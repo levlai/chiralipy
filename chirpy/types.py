@@ -35,6 +35,10 @@ class Bond:
         is_dative: Whether this is a dative/coordinate bond.
         dative_direction: Direction of dative bond (1 = atom1->atom2, -1 = atom2->atom1).
         is_any: Whether this is a SMARTS "any" bond (~).
+        
+        # SMARTS bond query fields:
+        is_ring_bond: Whether bond must be in a ring (@) - None means no constraint.
+        is_not_ring_bond: Whether bond must NOT be in a ring (!@).
     """
     
     idx: int
@@ -46,6 +50,10 @@ class Bond:
     is_dative: bool = False
     dative_direction: int = 0  # 1 means atom1->atom2, -1 means atom2->atom1
     is_any: bool = False  # SMARTS any bond (~)
+    
+    # SMARTS bond query fields
+    is_ring_bond: bool | None = None  # True = must be ring bond (@), False = no constraint
+    is_not_ring_bond: bool = False    # True = must NOT be ring bond (!@)
     
     def other_atom(self, atom_idx: int) -> int:
         """Get the index of the atom on the other end of this bond.
@@ -119,6 +127,7 @@ class Atom:
     is_wildcard: bool = False
     atom_list: list[str] | None = None
     atom_list_negated: bool = False
+    atomic_number_list: list[int] | None = None  # For [#0,#6,#7] patterns
     ring_count: int | None = None
     ring_size: int | None = None
     degree_query: int | None = None
@@ -126,6 +135,7 @@ class Atom:
     connectivity_query: int | None = None
     is_recursive: bool = False
     recursive_smarts: str | None = None
+    charge_query: int | None = None  # For [+0] exact charge query
     
     @property
     def atomic_number(self) -> int:
@@ -194,10 +204,13 @@ class Atom:
             else:
                 bond_order_sum += bond.order
         
-        # Implicit H = default_valence - bond_order - |charge| - explicit_H
+        # For charged atoms:
+        # - Positive charge means atom can accept more bonds (e.g., NH4+ has 4 bonds)
+        # - Negative charge means atom has fewer bonds (e.g., O- has 1 bond, CH3- has 3)
+        # Implicit H = default_valence - bond_order + charge - explicit_H
         implicit = max(
             0,
-            default_val - int(round(bond_order_sum)) - abs(self.charge) - self.explicit_hydrogens
+            default_val - int(round(bond_order_sum)) + self.charge - self.explicit_hydrogens
         )
         return self.explicit_hydrogens + implicit
 
@@ -253,6 +266,7 @@ class Molecule:
         is_wildcard: bool = False,
         atom_list: list[str] | None = None,
         atom_list_negated: bool = False,
+        atomic_number_list: list[int] | None = None,
         ring_count: int | None = None,
         ring_size: int | None = None,
         degree_query: int | None = None,
@@ -260,6 +274,7 @@ class Molecule:
         connectivity_query: int | None = None,
         is_recursive: bool = False,
         recursive_smarts: str | None = None,
+        charge_query: int | None = None,
     ) -> int:
         """Add an atom to the molecule.
         
@@ -274,6 +289,7 @@ class Molecule:
             is_wildcard: SMARTS wildcard atom.
             atom_list: SMARTS atom list [C,N,O].
             atom_list_negated: Whether atom list is negated [!C].
+            atomic_number_list: SMARTS atomic number list [#0,#6,#7].
             ring_count: SMARTS ring membership query.
             ring_size: SMARTS ring size query.
             degree_query: SMARTS degree query.
@@ -281,6 +297,7 @@ class Molecule:
             connectivity_query: SMARTS connectivity query.
             is_recursive: Whether this is a recursive SMARTS.
             recursive_smarts: The recursive SMARTS pattern.
+            charge_query: SMARTS exact charge query [+0].
         
         Returns:
             Index of the newly added atom.
@@ -298,6 +315,7 @@ class Molecule:
             is_wildcard=is_wildcard,
             atom_list=atom_list,
             atom_list_negated=atom_list_negated,
+            atomic_number_list=atomic_number_list,
             ring_count=ring_count,
             ring_size=ring_size,
             degree_query=degree_query,
@@ -305,6 +323,7 @@ class Molecule:
             connectivity_query=connectivity_query,
             is_recursive=is_recursive,
             recursive_smarts=recursive_smarts,
+            charge_query=charge_query,
         )
         self.atoms.append(atom)
         return idx
@@ -320,6 +339,8 @@ class Molecule:
         is_dative: bool = False,
         dative_direction: int = 0,
         is_any: bool = False,
+        is_ring_bond: bool | None = None,
+        is_not_ring_bond: bool = False,
     ) -> int:
         """Add a bond between two atoms.
         
@@ -332,6 +353,8 @@ class Molecule:
             is_dative: Whether this is a dative/coordinate bond.
             dative_direction: Direction (1 = atom1->atom2, -1 = atom2->atom1).
             is_any: Whether this is a SMARTS any bond.
+            is_ring_bond: SMARTS ring bond constraint (@).
+            is_not_ring_bond: SMARTS not ring bond constraint (!@).
         
         Returns:
             Index of the newly added bond.
@@ -353,6 +376,8 @@ class Molecule:
             is_dative=is_dative,
             dative_direction=dative_direction,
             is_any=is_any,
+            is_ring_bond=is_ring_bond,
+            is_not_ring_bond=is_not_ring_bond,
         )
         self.bonds.append(bond)
         self.atoms[atom1_idx].bond_indices.append(idx)

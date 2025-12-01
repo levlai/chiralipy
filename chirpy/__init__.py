@@ -30,7 +30,7 @@ pure Python for easy deployment and modification.
 
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __author__ = "Vladimir Lekić"
 __all__ = [
     # Core types
@@ -58,10 +58,20 @@ __all__ = [
     "substructure_search",
     "has_substructure",
     "count_matches",
+    # Kekulization
+    "kekulize",
+    # Hydrogen manipulation
+    "add_explicit_hydrogens",
+    "remove_explicit_hydrogens",
+    # BRICS decomposition
+    "find_brics_bonds",
+    "break_brics_bonds",
+    "brics_decompose",
     # Exceptions
     "ChemError",
     "ParseError",
     "ValenceError",
+    "KekulizationError",
     # Elements
     "Element",
     "BondOrder",
@@ -98,6 +108,22 @@ def __getattr__(name: str):
     
     if name in ("find_sssr", "find_ring_systems", "get_ring_info"):
         from .rings import find_sssr, find_ring_systems, get_ring_info
+        return locals()[name]
+    
+    if name == "kekulize":
+        from .kekulization import kekulize
+        return kekulize
+    
+    if name == "KekulizationError":
+        from .kekulization import KekulizationError
+        return KekulizationError
+    
+    if name in ("add_explicit_hydrogens", "remove_explicit_hydrogens"):
+        from .hydrogen import add_explicit_hydrogens, remove_explicit_hydrogens
+        return locals()[name]
+    
+    if name in ("find_brics_bonds", "break_brics_bonds", "brics_decompose"):
+        from .brics import find_brics_bonds, break_brics_bonds, brics_decompose
         return locals()[name]
     
     if name in ("ChemError", "ParseError", "ValenceError"):

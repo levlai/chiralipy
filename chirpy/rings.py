@@ -189,6 +189,44 @@ def get_ring_info(mol: "Molecule") -> tuple[dict[int, int], dict[int, set[int]]]
     return ring_count, ring_sizes
 
 
+def get_ring_bonds(mol: "Molecule") -> set[tuple[int, int]]:
+    """Get all bonds that are part of a ring.
+    
+    A bond is a ring bond if both atoms are in the same ring.
+    
+    Args:
+        mol: Molecule to analyze.
+    
+    Returns:
+        Set of (atom1_idx, atom2_idx) tuples for ring bonds,
+        where atom1_idx < atom2_idx.
+    
+    Example:
+        >>> mol = parse("c1ccccc1CC")  # toluene
+        >>> ring_bonds = get_ring_bonds(mol)
+        >>> len(ring_bonds)  # 6 bonds in benzene ring
+        6
+    """
+    ring_bonds: set[tuple[int, int]] = set()
+    rings = find_sssr(mol)
+    
+    for ring in rings:
+        ring_list = list(ring)
+        ring_set = set(ring_list)
+        
+        # Find all bonds where both atoms are in this ring
+        for atom_idx in ring_set:
+            atom = mol.atoms[atom_idx]
+            for bond_idx in atom.bond_indices:
+                bond = mol.bonds[bond_idx]
+                other = bond.other_atom(atom_idx)
+                if other in ring_set:
+                    key = (min(atom_idx, other), max(atom_idx, other))
+                    ring_bonds.add(key)
+    
+    return ring_bonds
+
+
 def find_ring_systems(rings: list[set[int]]) -> list[list[set[int]]]:
     """Group rings into fused ring systems.
     

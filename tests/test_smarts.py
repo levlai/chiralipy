@@ -356,3 +356,197 @@ class TestBackwardCompatibility:
         assert len(mol.bonds) == 3
         # None should be dative
         assert all(not b.is_dative for b in mol.bonds)
+
+
+class TestChargeQueries:
+    """Tests for bare charge SMARTS queries."""
+    
+    def test_positive_charge_only(self) -> None:
+        """Test [+] - any positive atom."""
+        mol = parse("[+]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].symbol == "*"
+        assert mol.atoms[0].charge == 1
+    
+    def test_negative_charge_only(self) -> None:
+        """Test [-] - any negative atom."""
+        mol = parse("[-]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].symbol == "*"
+        assert mol.atoms[0].charge == -1
+    
+    def test_positive_charge_numeric(self) -> None:
+        """Test [+2] - charge +2."""
+        mol = parse("[+2]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].symbol == "*"
+        assert mol.atoms[0].charge == 2
+    
+    def test_negative_charge_numeric(self) -> None:
+        """Test [-3] - charge -3."""
+        mol = parse("[-3]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].symbol == "*"
+        assert mol.atoms[0].charge == -3
+    
+    def test_double_plus(self) -> None:
+        """Test [++] - charge +2."""
+        mol = parse("[++]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].charge == 2
+    
+    def test_double_minus(self) -> None:
+        """Test [--] - charge -2."""
+        mol = parse("[--]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].charge == -2
+
+
+class TestHybridizationQueries:
+    """Tests for hybridization SMARTS queries (^)."""
+    
+    def test_sp_hybridization(self) -> None:
+        """Test [^1] - sp hybridized."""
+        mol = parse("[^1]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].symbol == "*"
+    
+    def test_sp2_hybridization(self) -> None:
+        """Test [^2] - sp2 hybridized."""
+        mol = parse("[^2]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].symbol == "*"
+    
+    def test_sp3_hybridization(self) -> None:
+        """Test [^3] - sp3 hybridized."""
+        mol = parse("[^3]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].symbol == "*"
+    
+    def test_carbon_sp2(self) -> None:
+        """Test [C^2] - sp2 carbon."""
+        mol = parse("[C^2]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].symbol == "C"
+    
+    def test_carbon_sp3(self) -> None:
+        """Test [C^3] - sp3 carbon."""
+        mol = parse("[C^3]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].symbol == "C"
+    
+    def test_atomic_number_with_hybridization(self) -> None:
+        """Test [#6^2] - sp2 carbon by atomic number."""
+        mol = parse("[#6^2]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].symbol == "C"
+
+
+class TestBondExpressions:
+    """Tests for SMARTS bond expressions (-;!@, -;@, etc.)."""
+    
+    def test_not_ring_bond(self) -> None:
+        """Test -;!@ - single bond not in ring."""
+        mol = parse("C-;!@C")
+        assert len(mol.bonds) == 1
+        assert mol.bonds[0].is_not_ring_bond is True
+    
+    def test_ring_bond(self) -> None:
+        """Test -;@ - single bond in ring."""
+        mol = parse("C-;@C")
+        assert len(mol.bonds) == 1
+        assert mol.bonds[0].is_ring_bond is True
+    
+    def test_standalone_ring_bond(self) -> None:
+        """Test @ as standalone ring bond marker."""
+        mol = parse("C@C")
+        assert len(mol.bonds) == 1
+        assert mol.bonds[0].is_ring_bond is True
+    
+    def test_double_not_ring_bond(self) -> None:
+        """Test =;!@ - double bond not in ring."""
+        mol = parse("C=;!@C")
+        assert len(mol.bonds) == 1
+        assert mol.bonds[0].order == 2
+        assert mol.bonds[0].is_not_ring_bond is True
+
+
+class TestAtomicNumberLists:
+    """Tests for atomic number list SMARTS ([#0,#6,#7])."""
+    
+    def test_single_atomic_number(self) -> None:
+        """Test [#6] - carbon by atomic number."""
+        mol = parse("[#6]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].symbol == "C"
+    
+    def test_dummy_atom(self) -> None:
+        """Test [#0] - dummy atom / attachment point."""
+        mol = parse("[#0]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].symbol == "*"
+    
+    def test_atomic_number_list(self) -> None:
+        """Test [#0,#6,#7] - list of atomic numbers."""
+        mol = parse("[#0,#6,#7]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].atomic_number_list == [0, 6, 7]
+    
+    def test_mixed_atomic_and_symbol(self) -> None:
+        """Test [#6,N,O] - mixed atomic number and symbols."""
+        mol = parse("[#6,N,O]")
+        assert len(mol.atoms) == 1
+
+
+class TestBRICSPatterns:
+    """Tests for RDKit BRICS decomposition patterns."""
+    
+    @pytest.mark.parametrize("smarts,label", [
+        ("[C;!R;!D1]-;!@[#6]", "L8_variant"),
+        ("[C;D3]([#0,#6,#7,#8])(=O)", "L1"),
+        ("[N;R;$(N(@C(=O))@[C,N,O,S])]", "L10"),
+        ("[S;D2](-;!@[#0,#6])", "L11"),
+        ("[S;D4]([#6,#0])(=O)(=O)", "L12"),
+        ("[C;$(C(-;@[C,N,O,S])-;@[N,O,S])]", "L13"),
+        ("[c;$(c(:[c,n,o,s]):[n,o,s])]", "L14"),
+        ("[C;$(C(-;@C)-;@C)]", "L15"),
+        ("[c;$(c(:c):c)]", "L16"),
+        ("[O;D2]-;!@[#0,#6,#1]", "L3"),
+        ("[C;!D1;!$(C=*)]-;!@[#6]", "L4"),
+        ("[N;!D1;!$(N=*);!$(N-[!#6;!#16;!#0;!#1]);!$([N;R]@[C;R]=O)]", "L5"),
+        ("[C;D3;!R](=O)-;!@[#0,#6,#7,#8]", "L6"),
+        ("[C;D2,D3]-[#6]", "L7a"),
+        ("[C;!R;!D1;!$(C!-*)]", "L8"),
+        ("[n;+0;$(n(:[c,n,o,s]):[c,n,o,s])]", "L9"),
+    ])
+    def test_brics_pattern(self, smarts: str, label: str) -> None:
+        """Test that BRICS patterns parse correctly."""
+        mol = parse(smarts)
+        assert len(mol.atoms) >= 1, f"Failed to parse {label}: {smarts}"
+
+
+class TestComplexRecursiveSmarts:
+    """Tests for complex recursive SMARTS patterns."""
+    
+    def test_recursive_with_atom_list(self) -> None:
+        """Test recursive SMARTS containing atom lists."""
+        mol = parse("[N;$(C[N,O])]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].is_recursive is True
+    
+    def test_recursive_with_ring_bond(self) -> None:
+        """Test recursive SMARTS with ring bond (@)."""
+        mol = parse("[C;$(C@C)]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].is_recursive is True
+    
+    def test_multiple_recursive(self) -> None:
+        """Test multiple recursive SMARTS in one pattern."""
+        mol = parse("[N;!$(N=*);!$(N-C)]")
+        assert len(mol.atoms) == 1
+    
+    def test_nested_brackets_in_recursive(self) -> None:
+        """Test recursive SMARTS with nested bracket atoms."""
+        mol = parse("[N;$(N(@C(=O))@[C,N,O,S])]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].is_recursive is True

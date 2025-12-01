@@ -148,6 +148,10 @@ class _ParserState:
     pending_bond_dative: bool = False
     pending_bond_dative_dir: int = 0  # 1 = ->, -1 = <-
     pending_bond_any: bool = False  # SMARTS any bond
+    
+    # SMARTS bond query fields
+    pending_bond_ring: bool | None = None  # True = must be ring bond (@)
+    pending_bond_not_ring: bool = False    # True = must NOT be ring bond (!@)
 
 
 class SmilesParser:
@@ -256,8 +260,8 @@ class SmilesParser:
                 self._state.pending_bond_order = 6  # DATIVE order
                 continue
             
-            if char in "-=#:$~" or char in "/\\":
-                # Regular bond or stereo
+            if char in "-=#:$~@" or char in "/\\":
+                # Regular bond or stereo or ring bond constraint (@)
                 self._parse_bond()
                 continue
             
@@ -309,8 +313,21 @@ class SmilesParser:
         return self._mol
     
     def _parse_bond(self) -> None:
-        """Parse a bond symbol."""
-        char = self._tokenizer.next()
+        """Parse a bond symbol, including SMARTS bond expressions.
+        
+        SMARTS bond expressions can include:
+        - Basic bonds: - = # : ~ $
+        - Ring bond: @ (must be in ring)
+        - Not ring bond: !@
+        - AND operator: ; (e.g., -;!@ means single AND not ring)
+        - Stereo markers: / \\
+        """
+        tok = self._tokenizer
+        char = tok.next()
+        
+        # Reset bond query state
+        self._state.pending_bond_ring = None
+        self._state.pending_bond_not_ring = False
         
         if char in self._BOND_CHARS:
             order, aromatic, is_dative, dative_dir, is_any = self._BOND_CHARS[char]
@@ -320,9 +337,48 @@ class SmilesParser:
             self._state.pending_bond_dative = is_dative
             self._state.pending_bond_dative_dir = dative_dir
             self._state.pending_bond_any = is_any
+            
+            # Check for SMARTS bond expression continuation (;)
+            self._parse_bond_expression()
+            
+        elif char == "@":
+            # Ring bond constraint (standalone)
+            self._state.pending_bond_ring = True
+            self._parse_bond_expression()
+            
         elif char in "/\\":
             # Stereochemistry marker - keep bond implicit
             self._state.pending_bond_stereo = char
+    
+    def _parse_bond_expression(self) -> None:
+        """Parse remaining SMARTS bond expression after initial bond symbol.
+        
+        Handles: ;!@ ;@ !@ @ and combinations
+        """
+        tok = self._tokenizer
+        
+        while tok.peek() in ";!@":
+            char = tok.peek()
+            
+            if char == ";":
+                # AND operator - continue parsing
+                tok.next()
+                continue
+            
+            if char == "!":
+                # Negation - check what follows
+                tok.next()
+                if tok.peek() == "@":
+                    tok.next()
+                    self._state.pending_bond_not_ring = True
+                # Could extend for other negated bond properties
+                continue
+            
+            if char == "@":
+                # Ring bond constraint
+                tok.next()
+                self._state.pending_bond_ring = True
+                continue
     
     def _parse_wildcard_atom(self) -> None:
         """Parse a wildcard atom (*)."""
@@ -523,6 +579,8 @@ class SmilesParser:
         is_recursive = False
         recursive_smarts: str | None = None
         atom_list: list[str] = []
+        atomic_number_list: list[int] = []
+        charge_query: int | None = None
         
         # Check for recursive SMARTS $(...) 
         if tok.peek() == "$" and self._lookahead_recursive():
@@ -549,8 +607,9 @@ class SmilesParser:
         # Try to parse element symbol or SMARTS query
         char1 = tok.peek()
         
-        # Handle SMARTS queries that start with capital letters
-        if char1 in "RDXvr#":
+        # Handle SMARTS queries that start with capital letters or special chars
+        # Note: # is handled separately below to support atomic number lists [#0,#6,#7]
+        if char1 in "RDXvr^":
             # These are SMARTS query primitives
             symbol, ring_count, ring_size, degree_query, valence_query, connectivity_query = \
                 self._parse_smarts_queries()
@@ -577,19 +636,43 @@ class SmilesParser:
                 atom_list.append(symbol)
                 while tok.peek() == ",":
                     tok.next()
-                    next_symbol = self._read_element_symbol()
+                    next_symbol = self._read_element_symbol_or_atomic_number()
                     if next_symbol:
                         atom_list.append(next_symbol)
                 symbol = atom_list[0] if atom_list else "*"
         elif char1 == "#":
-            # Atomic number specification [#6] = carbon
+            # Atomic number specification [#6] = carbon or [#0,#6,#7] = list
             tok.next()
             atomic_num = tok.read_number()
             if atomic_num is not None:
-                elem = Element.from_atomic_number(atomic_num)
-                symbol = elem.symbol if elem else "*"
+                atomic_number_list.append(atomic_num)
+                # Handle atomic number as symbol
+                if atomic_num == 0:
+                    symbol = "*"  # #0 = dummy atom / any
+                else:
+                    elem = Element.from_atomic_number(atomic_num)
+                    symbol = elem.symbol if elem else "*"
+                
+                # Check for comma-separated atomic number list [#0,#6,#7]
+                while tok.peek() == ",":
+                    tok.next()
+                    if tok.peek() == "#":
+                        tok.next()
+                        next_num = tok.read_number()
+                        if next_num is not None:
+                            atomic_number_list.append(next_num)
+                    else:
+                        # Could be element symbol mixed in
+                        next_sym = self._read_element_symbol()
+                        if next_sym:
+                            atom_list.append(next_sym)
             else:
                 symbol = "*"
+        elif char1 in "+-":
+            # Bare charge query [+], [-], [+2], [-3], etc.
+            # This is a wildcard with charge constraint
+            symbol = "*"
+            # Don't consume the + or - here; it will be handled in the charge parsing loop below
         else:
             raise ParseError(
                 "Expected element symbol or SMARTS query",
@@ -623,8 +706,10 @@ class SmilesParser:
                 h_count = tok.read_number()
                 hydrogens = h_count if h_count is not None else 1
             elif char in "+-":
-                # Charge
-                charge = self._parse_charge()
+                # Charge - could be +0 which means "charge must be 0"
+                charge, is_explicit_zero = self._parse_charge_with_query()
+                if is_explicit_zero:
+                    charge_query = 0  # Explicit +0 or -0 means charge must be 0
             elif char == ":":
                 # Atom class
                 tok.next()
@@ -659,6 +744,13 @@ class SmilesParser:
                 valence_query = tok.read_number()
                 if valence_query is None:
                     valence_query = -1
+            elif char == "^":
+                # Hybridization query: ^1=sp, ^2=sp2, ^3=sp3
+                tok.next()
+                hyb_num = tok.read_number()
+                # Store as hybridization_query attribute (1=sp, 2=sp2, 3=sp3)
+                # We'll add this to SMARTS attributes
+                pass  # Currently parsed but not stored; can be extended
             elif char == ",":
                 # More atom list entries
                 tok.next()
@@ -667,6 +759,51 @@ class SmilesParser:
                     if not atom_list and symbol != "*":
                         atom_list.append(symbol)
                     atom_list.append(next_symbol)
+            elif char == ";":
+                # SMARTS AND operator - just continue parsing more attributes
+                tok.next()
+            elif char == "&":
+                # SMARTS explicit AND operator - just continue parsing
+                tok.next()
+            elif char == "$":
+                # Recursive SMARTS $(...) appearing after other attributes
+                if self._lookahead_recursive():
+                    tok.next()  # consume $
+                    tok.expect("(")
+                    recursive_smarts = self._read_recursive_smarts()
+                    is_recursive = True
+                else:
+                    tok.next()  # Skip unrecognized $
+            elif char == "!":
+                # Negation - handle negated queries like !R, !D1, etc.
+                tok.next()
+                next_char = tok.peek()
+                if next_char == "R":
+                    tok.next()
+                    num = tok.read_number()
+                    ring_count = 0 if num is None else -num - 100  # Signal negated
+                elif next_char == "D":
+                    tok.next()
+                    num = tok.read_number()
+                    # Could store negated degree
+                elif next_char == "$":
+                    # Negated recursive SMARTS !$(...)
+                    if self._lookahead_recursive():
+                        tok.next()  # consume $
+                        tok.expect("(")
+                        neg_recursive = self._read_recursive_smarts()
+                        # Could store negated recursive
+                    else:
+                        tok.next()
+                # Skip other negated things for now
+            elif char == "a":
+                # Aromatic query - lowercase 'a' means any aromatic
+                tok.next()
+                aromatic = True
+            elif char == "A":
+                # Aliphatic query - uppercase 'A' means any aliphatic
+                tok.next()
+                aromatic = False
             else:
                 # Skip unrecognized
                 tok.next()
@@ -688,6 +825,7 @@ class SmilesParser:
             is_wildcard=(symbol == "*"),
             atom_list=atom_list if atom_list else None,
             atom_list_negated=is_negated,
+            atomic_number_list=atomic_number_list if atomic_number_list else None,
             ring_count=ring_count,
             ring_size=ring_size,
             degree_query=degree_query,
@@ -695,6 +833,7 @@ class SmilesParser:
             connectivity_query=connectivity_query,
             is_recursive=is_recursive,
             recursive_smarts=recursive_smarts,
+            charge_query=charge_query,
         )
         self._mol.atoms[atom_idx]._was_first_in_component = is_first
         
@@ -712,11 +851,16 @@ class SmilesParser:
         return False
     
     def _read_recursive_smarts(self) -> str:
-        """Read recursive SMARTS content until matching parenthesis."""
+        """Read recursive SMARTS content until matching parenthesis.
+        
+        Properly handles nested brackets [...] within the recursive content.
+        """
         tok = self._tokenizer
-        depth = 1
+        paren_depth = 1
+        bracket_depth = 0
         content = []
-        while depth > 0:
+        
+        while paren_depth > 0:
             char = tok.next()
             if char is None:
                 raise ParseError(
@@ -724,13 +868,20 @@ class SmilesParser:
                     self._smiles,
                     tok.position,
                 )
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth == 0:
+            
+            if char == "[":
+                bracket_depth += 1
+            elif char == "]":
+                bracket_depth -= 1
+            elif char == "(" and bracket_depth == 0:
+                paren_depth += 1
+            elif char == ")" and bracket_depth == 0:
+                paren_depth -= 1
+                if paren_depth == 0:
                     break
+            
             content.append(char)
+        
         return "".join(content)
     
     def _read_element_symbol(self) -> str | None:
@@ -749,8 +900,30 @@ class SmilesParser:
                 symbol = candidate
         return symbol
     
+    def _read_element_symbol_or_atomic_number(self) -> str | None:
+        """Read an element symbol or atomic number specification (#N)."""
+        tok = self._tokenizer
+        char1 = tok.peek()
+        
+        if char1 == "#":
+            # Atomic number specification
+            tok.next()
+            atomic_num = tok.read_number()
+            if atomic_num is not None:
+                if atomic_num == 0:
+                    return "*"  # #0 = dummy atom
+                elem = Element.from_atomic_number(atomic_num)
+                return elem.symbol if elem else "*"
+            return None
+        elif char1 and char1.isalpha():
+            return self._read_element_symbol()
+        return None
+    
     def _parse_smarts_queries(self) -> tuple:
         """Parse SMARTS query primitives at start of bracket atom.
+        
+        Note: # (atomic number) is NOT handled here - it's handled separately
+        in _parse_bracket_atom to support atomic number lists [#0,#6,#7].
         
         Returns:
             Tuple of (symbol, ring_count, ring_size, degree, valence, connectivity)
@@ -763,15 +936,9 @@ class SmilesParser:
         valence_query: int | None = None
         connectivity_query: int | None = None
         
-        while tok.peek() in "RDXvr#":
+        while tok.peek() in "RDXvr^":
             char = tok.peek()
-            if char == "#":
-                tok.next()
-                atomic_num = tok.read_number()
-                if atomic_num is not None:
-                    elem = Element.from_atomic_number(atomic_num)
-                    symbol = elem.symbol if elem else "*"
-            elif char == "R":
+            if char == "R":
                 tok.next()
                 ring_count = tok.read_number()
                 if ring_count is None:
@@ -796,6 +963,11 @@ class SmilesParser:
                 valence_query = tok.read_number()
                 if valence_query is None:
                     valence_query = -1
+            elif char == "^":
+                # Hybridization query: ^1=sp, ^2=sp2, ^3=sp3
+                # Consume and ignore for now; can be stored if needed
+                tok.next()
+                tok.read_number()  # consume the number
         
         return symbol, ring_count, ring_size, degree_query, valence_query, connectivity_query
         is_first = self._state.prev_atom is None
@@ -819,11 +991,21 @@ class SmilesParser:
     
     def _parse_charge(self) -> int:
         """Parse optional charge (+, -, ++, --, +2, -3, etc.)."""
+        charge, _ = self._parse_charge_with_query()
+        return charge
+    
+    def _parse_charge_with_query(self) -> tuple[int, bool]:
+        """Parse optional charge, returning (charge_value, is_explicit_zero).
+        
+        Returns:
+            Tuple of (charge, is_explicit_zero) where is_explicit_zero is True
+            if the pattern was +0 or -0 (SMARTS query for neutral).
+        """
         tok = self._tokenizer
         
         char = tok.peek()
         if char not in "+-":
-            return 0
+            return 0, False
         
         sign = 1 if char == "+" else -1
         
@@ -836,9 +1018,11 @@ class SmilesParser:
         # Check for numeric charge after
         num = tok.read_number()
         if num is not None:
-            return sign * num
+            # Explicit +0 or -0 means charge must be exactly 0
+            is_explicit_zero = (num == 0)
+            return sign * num, is_explicit_zero
         
-        return sign * max(1, count)
+        return sign * max(1, count), False
     
     def _add_bond_to_previous(self, atom_idx: int, is_aromatic: bool) -> None:
         """Add bond from previous atom to new atom."""
@@ -846,6 +1030,10 @@ class SmilesParser:
             return
         
         prev_aromatic = self._mol.atoms[self._state.prev_atom].is_aromatic
+        
+        # Capture bond query state before resetting
+        is_ring_bond = self._state.pending_bond_ring
+        is_not_ring_bond = self._state.pending_bond_not_ring
         
         # Handle any bond (~) for SMARTS
         if self._state.pending_bond_any:
@@ -855,13 +1043,10 @@ class SmilesParser:
                 order=0,  # ANY bond order
                 is_aromatic=False,
                 is_any=True,
+                is_ring_bond=is_ring_bond,
+                is_not_ring_bond=is_not_ring_bond,
             )
-            self._state.pending_bond_order = None
-            self._state.pending_bond_aromatic = None
-            self._state.pending_bond_stereo = None
-            self._state.pending_bond_dative = False
-            self._state.pending_bond_dative_dir = None
-            self._state.pending_bond_any = False
+            self._reset_bond_state()
             return
         
         # Handle dative bonds (-> or <-)
@@ -873,13 +1058,10 @@ class SmilesParser:
                 is_aromatic=False,
                 is_dative=True,
                 dative_direction=self._state.pending_bond_dative_dir,
+                is_ring_bond=is_ring_bond,
+                is_not_ring_bond=is_not_ring_bond,
             )
-            self._state.pending_bond_order = None
-            self._state.pending_bond_aromatic = None
-            self._state.pending_bond_stereo = None
-            self._state.pending_bond_dative = False
-            self._state.pending_bond_dative_dir = None
-            self._state.pending_bond_any = False
+            self._reset_bond_state()
             return
         
         # Determine bond properties
@@ -897,15 +1079,22 @@ class SmilesParser:
             order=1 if aromatic else order,
             is_aromatic=aromatic,
             stereo=self._state.pending_bond_stereo,
+            is_ring_bond=is_ring_bond,
+            is_not_ring_bond=is_not_ring_bond,
         )
         
-        # Reset pending bond state
+        self._reset_bond_state()
+    
+    def _reset_bond_state(self) -> None:
+        """Reset all pending bond state."""
         self._state.pending_bond_order = None
         self._state.pending_bond_aromatic = None
         self._state.pending_bond_stereo = None
         self._state.pending_bond_dative = False
         self._state.pending_bond_dative_dir = None
         self._state.pending_bond_any = False
+        self._state.pending_bond_ring = None
+        self._state.pending_bond_not_ring = False
 
 
 def parse(smiles: str) -> Molecule:
