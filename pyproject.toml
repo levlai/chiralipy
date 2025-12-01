@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chirpy"
+version = "0.2.0"
+description = "Pure Python SMILES/SMARTS chemistry library with zero dependencies"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Vladimir Lekić" }
+]
+keywords = [
+    "chemistry",
+    "smiles",
+    "smarts",
+    "cheminformatics",
+    "molecular",
+    "parsing",
+    "canonicalization",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "mypy>=1.0",
+    "ruff>=0.1",
+]
+test = [
+    "pytest>=7.0",
+    "rdkit>=2023.0",  # For comparison tests
+]
+
+[project.urls]
+Homepage = "https://github.com/vlekic/chirpy"
+Documentation = "https://github.com/vlekic/chirpy#readme"
+Repository = "https://github.com/vlekic/chirpy"
+
+[tool.hatch.build.targets.wheel]
+packages = ["chirpy"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/chirpy",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+strict = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
