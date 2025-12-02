@@ -55,6 +55,23 @@ from chirpy import (
 )
 ```
 
+## Benchmark: BRICS Decomposition
+
+Comparison against RDKit (C++ implementation):
+
+```
+Molecule            Atoms  Bonds   RDKit ms  chirpy ms    Ratio
+----------------------------------------------------------------
+small_ether             5      4     0.37       0.39      1.05x
+medium_drug            15     15     0.87       1.21      1.39x
+drug_like              37     41     3.48       3.24      0.93x  ← faster
+large_complex          84     98     5.04       8.71      1.73x
+
+Average: 1.28x slower than RDKit
+```
+
+Run benchmark: `python benchmarks/bench_brics.py --extended`
+
 ## License
 
 MIT
