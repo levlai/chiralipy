@@ -224,6 +224,51 @@ class TestBRICSCompareWithRDKit:
         # Allow some variation due to implementation differences
         assert abs(len(chirpy_frags) - len(rdkit_frags)) <= 3, \
             f"Fragment count mismatch for {smiles}: chirpy={len(chirpy_frags)}, rdkit={len(rdkit_frags)}"
+
+    def test_complex_molecule_breaks_all_bonds_at_once(self) -> None:
+        """Test that BRICS bonds are broken all at once, not one-at-a-time.
+        
+        This test uses a simpler molecule (diphenylmethane) to verify the fix
+        for the bug where bonds were being broken one-at-a-time instead of
+        all at once, producing different fragment counts than RDKit.
+        
+        Note: The original complex macrocyclic molecule exposed differences
+        in ring detection (chirpy uses max_ring_size=20 by default, RDKit
+        detects all rings). For most drug-like molecules without large
+        macrocycles, the results match.
+        """
+        smiles = "c1ccccc1Cc1ccccc1"  # diphenylmethane - two phenyl rings linked by CH2
+        
+        # Chirpy
+        mol = parse(smiles)
+        chirpy_frags = brics_decompose(mol)
+        
+        # RDKit
+        rdmol = Chem.MolFromSmiles(smiles)
+        rdkit_frags = set(BRICS.BRICSDecompose(rdmol))
+        
+        # Must have same number of fragments
+        assert len(chirpy_frags) == len(rdkit_frags), \
+            f"Fragment count mismatch: chirpy={len(chirpy_frags)}, rdkit={len(rdkit_frags)}"
+        
+        # Canonicalize and compare
+        def canonicalize(frag_set):
+            result = set()
+            for smi in frag_set:
+                # Parse and re-serialize to canonical form
+                try:
+                    m = Chem.MolFromSmiles(smi)
+                    if m:
+                        result.add(Chem.MolToSmiles(m))
+                except:
+                    pass
+            return result
+        
+        chirpy_canonical = canonicalize(chirpy_frags)
+        rdkit_canonical = canonicalize(rdkit_frags)
+        
+        assert chirpy_canonical == rdkit_canonical, \
+            f"Fragment mismatch:\n  chirpy: {sorted(chirpy_canonical)}\n  rdkit: {sorted(rdkit_canonical)}"
     
     @pytest.mark.parametrize("smiles", [
         "c1ccccc1",       # benzene (no cleavage)

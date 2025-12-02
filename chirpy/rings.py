@@ -16,14 +16,111 @@ if TYPE_CHECKING:
     from .types import Molecule
 
 
-def find_sssr(mol: "Molecule", max_ring_size: int = 20) -> list[set[int]]:
+def _find_ring_atoms_and_bonds_fast(mol: "Molecule") -> tuple[set[int], set[tuple[int, int]]]:
+    """Fast detection of ring atoms and bonds using DFS cycle detection.
+    
+    This is O(V+E) and doesn't enumerate all rings, just identifies which
+    atoms and bonds are part of ANY cycle.
+    
+    Returns:
+        Tuple of (ring_atoms, ring_bonds) where ring_bonds are (min_idx, max_idx) tuples.
+    """
+    if mol.num_atoms == 0:
+        return set(), set()
+    
+    # Build adjacency list with bond indices
+    adj: dict[int, list[tuple[int, int]]] = {i: [] for i in range(mol.num_atoms)}
+    for bond in mol.bonds:
+        adj[bond.atom1_idx].append((bond.atom2_idx, bond.idx))
+        adj[bond.atom2_idx].append((bond.atom1_idx, bond.idx))
+    
+    # DFS to find back edges (which indicate cycles)
+    visited: set[int] = set()
+    in_stack: set[int] = set()
+    parent: dict[int, int] = {}
+    parent_bond: dict[int, int] = {}
+    back_edge_bonds: set[int] = set()  # Bond indices that are back edges
+    
+    def dfs(node: int) -> None:
+        visited.add(node)
+        in_stack.add(node)
+        
+        for neighbor, bond_idx in adj[node]:
+            if neighbor not in visited:
+                parent[neighbor] = node
+                parent_bond[neighbor] = bond_idx
+                dfs(neighbor)
+            elif neighbor in in_stack and parent.get(node) != neighbor:
+                # Back edge found - this bond is part of a cycle
+                back_edge_bonds.add(bond_idx)
+        
+        in_stack.remove(node)
+    
+    # Run DFS from each unvisited node
+    for start in range(mol.num_atoms):
+        if start not in visited:
+            parent[start] = -1
+            dfs(start)
+    
+    if not back_edge_bonds:
+        return set(), set()
+    
+    # Now find all atoms and bonds that are part of cycles
+    # A bond is a ring bond if removing it increases the number of connected components
+    # But that's expensive. Instead, use the fact that ring bonds are those where 
+    # both atoms can reach each other via another path.
+    
+    # Simpler approach: find all bonds in the "2-edge-connected" components
+    # Using a different algorithm based on low-link values (Tarjan's bridge-finding)
+    
+    ring_bonds: set[tuple[int, int]] = set()
+    ring_atoms: set[int] = set()
+    
+    # Find bridges using Tarjan's algorithm
+    discovery: dict[int, int] = {}
+    low: dict[int, int] = {}
+    bridges: set[int] = set()
+    time_counter = [0]
+    
+    def find_bridges(node: int, parent_node: int, parent_bond_idx: int) -> None:
+        discovery[node] = low[node] = time_counter[0]
+        time_counter[0] += 1
+        
+        for neighbor, bond_idx in adj[node]:
+            if neighbor not in discovery:
+                find_bridges(neighbor, node, bond_idx)
+                low[node] = min(low[node], low[neighbor])
+                
+                # If low[neighbor] > discovery[node], this is a bridge
+                if low[neighbor] > discovery[node]:
+                    bridges.add(bond_idx)
+            elif bond_idx != parent_bond_idx:
+                low[node] = min(low[node], discovery[neighbor])
+    
+    discovery.clear()
+    for start in range(mol.num_atoms):
+        if start not in discovery:
+            find_bridges(start, -1, -1)
+    
+    # All bonds that are NOT bridges are ring bonds
+    for bond in mol.bonds:
+        if bond.idx not in bridges:
+            key = (min(bond.atom1_idx, bond.atom2_idx), max(bond.atom1_idx, bond.atom2_idx))
+            ring_bonds.add(key)
+            ring_atoms.add(bond.atom1_idx)
+            ring_atoms.add(bond.atom2_idx)
+    
+    return ring_atoms, ring_bonds
+
+
+def find_sssr(mol: "Molecule", max_ring_size: int | None = None) -> list[set[int]]:
     """Find Smallest Set of Smallest Rings (SSSR).
     
     Uses a DFS-based approach to find all simple cycles in the molecule.
     
     Args:
         mol: Molecule to analyze.
-        max_ring_size: Maximum ring size to consider (default 20).
+        max_ring_size: Maximum ring size to consider (default None = no limit).
     
     Returns:
         List of rings, each as a set of atom indices.
@@ -56,7 +153,7 @@ def find_sssr(mol: "Molecule", max_ring_size: int = 20) -> list[set[int]]:
         visited: set[int],
     ) -> None:
         """DFS to find cycles starting from start node."""
-        if len(path) > max_ring_size + 1:
+        if max_ring_size is not None and len(path) > max_ring_size + 1:
             return
         
         for neighbor in adj[current]:
@@ -77,8 +174,10 @@ def find_sssr(mol: "Molecule", max_ring_size: int = 20) -> list[set[int]]:
     # Remove duplicates and keep smallest unique rings
     unique_rings = _filter_unique_rings(all_rings)
     
-    # Filter by size
-    return [r for r in unique_rings if len(r) <= max_ring_size]
+    # Filter by size if limit is set
+    if max_ring_size is not None:
+        return [r for r in unique_rings if len(r) <= max_ring_size]
+    return unique_rings
 
 
 def _filter_unique_rings(rings: list[tuple[int, ...]]) -> list[set[int]]:
@@ -107,7 +206,29 @@ def _filter_unique_rings(rings: list[tuple[int, ...]]) -> list[set[int]]:
     return unique
 
 
-def get_ring_info(mol: "Molecule") -> tuple[dict[int, int], dict[int, set[int]]]:
+def get_ring_membership(mol: "Molecule") -> dict[int, int]:
+    """Fast ring membership detection (is atom in any ring?).
+    
+    Uses Tarjan's bridge algorithm for O(V+E) performance.
+    For each atom, returns 1 if in a ring, 0 otherwise.
+    
+    Note: This doesn't count HOW MANY rings an atom is in, just whether
+    it's in at least one. For accurate ring counts, use get_ring_info().
+    
+    Args:
+        mol: Molecule to analyze.
+    
+    Returns:
+        Dict mapping atom index to 1 (in ring) or 0 (not in ring).
+    """
+    ring_atoms, _ = _find_ring_atoms_and_bonds_fast(mol)
+    return {i: (1 if i in ring_atoms else 0) for i in range(mol.num_atoms)}
+
+
+def get_ring_info(
+    mol: "Molecule",
+    _ring_atoms: set[int] | None = None,
+) -> tuple[dict[int, int], dict[int, set[int]]]:
     """Get ring membership and sizes for each atom.
     
     This is useful for SMARTS queries like [R] (in ring), [R2] (in 2 rings),
@@ -117,6 +238,7 @@ def get_ring_info(mol: "Molecule") -> tuple[dict[int, int], dict[int, set[int]]]
     
     Args:
         mol: Molecule to analyze.
+        _ring_atoms: Optional precomputed ring atoms (internal optimization).
     
     Returns:
         A tuple of (ring_count, ring_sizes) where:
@@ -137,6 +259,15 @@ def get_ring_info(mol: "Molecule") -> tuple[dict[int, int], dict[int, set[int]]]
     if mol.num_atoms == 0:
         return ring_count, ring_sizes
     
+    # Use precomputed ring atoms or compute them
+    if _ring_atoms is None:
+        ring_atoms, _ = _find_ring_atoms_and_bonds_fast(mol)
+    else:
+        ring_atoms = _ring_atoms
+    
+    if not ring_atoms:
+        return ring_count, ring_sizes
+    
     # Build adjacency list
     adj: dict[int, set[int]] = {i: set() for i in range(mol.num_atoms)}
     for bond in mol.bonds:
@@ -147,8 +278,12 @@ def get_ring_info(mol: "Molecule") -> tuple[dict[int, int], dict[int, set[int]]]
     # For each edge (start, first_nbr), find shortest path back to start
     found_rings: set[frozenset[int]] = set()
     
-    for start in range(mol.num_atoms):
+    # Only start from ring atoms (optimization)
+    for start in ring_atoms:
         for first_nbr in adj[start]:
+            if first_nbr not in ring_atoms:
+                continue  # Skip non-ring neighbors
+                
             # Find shortest path from first_nbr back to start
             # without using the direct start-first_nbr edge
             visited: dict[int, int | None] = {first_nbr: None}
@@ -192,7 +327,8 @@ def get_ring_info(mol: "Molecule") -> tuple[dict[int, int], dict[int, set[int]]]
 def get_ring_bonds(mol: "Molecule") -> set[tuple[int, int]]:
     """Get all bonds that are part of a ring.
     
-    A bond is a ring bond if both atoms are in the same ring.
+    Uses Tarjan's bridge-finding algorithm for O(V+E) performance.
+    A bond is a ring bond if it's not a bridge (removing it doesn't disconnect the graph).
     
     Args:
         mol: Molecule to analyze.
@@ -207,23 +343,7 @@ def get_ring_bonds(mol: "Molecule") -> set[tuple[int, int]]:
         >>> len(ring_bonds)  # 6 bonds in benzene ring
         6
     """
-    ring_bonds: set[tuple[int, int]] = set()
-    rings = find_sssr(mol)
-    
-    for ring in rings:
-        ring_list = list(ring)
-        ring_set = set(ring_list)
-        
-        # Find all bonds where both atoms are in this ring
-        for atom_idx in ring_set:
-            atom = mol.atoms[atom_idx]
-            for bond_idx in atom.bond_indices:
-                bond = mol.bonds[bond_idx]
-                other = bond.other_atom(atom_idx)
-                if other in ring_set:
-                    key = (min(atom_idx, other), max(atom_idx, other))
-                    ring_bonds.add(key)
-    
+    _, ring_bonds = _find_ring_atoms_and_bonds_fast(mol)
     return ring_bonds
 
 

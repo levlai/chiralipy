@@ -970,24 +970,6 @@ class SmilesParser:
                 tok.read_number()  # consume the number
         
         return symbol, ring_count, ring_size, degree_query, valence_query, connectivity_query
-        is_first = self._state.prev_atom is None
-        
-        # Add atom
-        atom_idx = self._mol.add_atom(
-            symbol=symbol,
-            charge=charge,
-            explicit_hydrogens=hydrogens,
-            is_aromatic=aromatic,
-            isotope=isotope,
-            chirality=chirality,
-            atom_class=atom_class,
-        )
-        self._mol.atoms[atom_idx]._was_first_in_component = is_first
-        
-        # Add bond to previous atom
-        self._add_bond_to_previous(atom_idx, aromatic)
-        
-        self._state.prev_atom = atom_idx
     
     def _parse_charge(self) -> int:
         """Parse optional charge (+, -, ++, --, +2, -3, etc.)."""

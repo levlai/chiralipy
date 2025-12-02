@@ -58,6 +58,7 @@ __all__ = [
     "substructure_search",
     "has_substructure",
     "count_matches",
+    "RingInfo",
     # Kekulization
     "kekulize",
     # Hydrogen manipulation
@@ -102,8 +103,8 @@ def __getattr__(name: str):
         from .aromaticity import perceive_aromaticity, AromaticityPerceiver
         return locals()[name]
     
-    if name in ("substructure_search", "has_substructure", "count_matches"):
-        from .match import substructure_search, has_substructure, count_matches
+    if name in ("substructure_search", "has_substructure", "count_matches", "RingInfo"):
+        from .match import substructure_search, has_substructure, count_matches, RingInfo
         return locals()[name]
     
     if name in ("find_sssr", "find_ring_systems", "get_ring_info"):

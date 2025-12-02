@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Final
 from .aromaticity import perceive_aromaticity
 from .canon import canonical_ranks
 from .elements import AROMATIC_SUBSET, ORGANIC_SUBSET
+from .rings import _find_ring_atoms_and_bonds_fast
 
 if TYPE_CHECKING:
     from .types import Atom, Bond, Molecule
@@ -291,41 +292,22 @@ class SmilesWriter:
         return "".join(out)
     
     def _find_ring_bonds(self, comp_atoms: set[int]) -> set[int]:
-        """Find bonds that are part of a ring."""
+        """Find bonds that are part of a ring using Tarjan's bridge algorithm.
+        
+        Uses O(V+E) algorithm instead of O(E^2) per-bond BFS.
+        """
         mol = self._mol
+        
+        # Use the fast algorithm - get ring bond tuples
+        _, ring_bond_tuples = _find_ring_atoms_and_bonds_fast(mol)
+        
+        # Convert to bond indices, filtering to this component
         ring_bonds: set[int] = set()
-        
-        adj: dict[int, set[int]] = {a: set() for a in comp_atoms}
-        
-        for bond in mol.bonds:
-            if bond.atom1_idx in comp_atoms and bond.atom2_idx in comp_atoms:
-                adj[bond.atom1_idx].add(bond.atom2_idx)
-                adj[bond.atom2_idx].add(bond.atom1_idx)
-        
         for bond in mol.bonds:
             if bond.atom1_idx not in comp_atoms or bond.atom2_idx not in comp_atoms:
                 continue
-            
-            # Check if we can reach atom2 from atom1 without this bond
-            visited: set[int] = {bond.atom1_idx}
-            stack = [bond.atom1_idx]
-            found = False
-            
-            while stack and not found:
-                cur = stack.pop()
-                for nbr in adj[cur]:
-                    if nbr == bond.atom2_idx and cur == bond.atom1_idx:
-                        continue
-                    if nbr == bond.atom1_idx and cur == bond.atom2_idx:
-                        continue
-                    if nbr == bond.atom2_idx:
-                        found = True
-                        break
-                    if nbr not in visited:
-                        visited.add(nbr)
-                        stack.append(nbr)
-            
-            if found:
+            key = (min(bond.atom1_idx, bond.atom2_idx), max(bond.atom1_idx, bond.atom2_idx))
+            if key in ring_bond_tuples:
                 ring_bonds.add(bond.idx)
         
         return ring_bonds

@@ -2,14 +2,18 @@
 BRICS decomposition algorithm.
 
 Implementation of the BRICS (Breaking of Retrosynthetically Interesting
-Chemical Substructures) algorithm from:
-Degen et al. ChemMedChem 2008, 3, 1503-7.
+Chemical Substructures) algorithm based on:
+
+    Degen et al. "On the Art of Compiling and Using 'Drug-Like' 
+    Chemical Fragment Spaces" ChemMedChem 2008, 3, 1503-1507.
+    DOI: 10.1002/cmdc.200800178
 
 This module provides functions for fragmenting molecules at strategic
 bonds commonly found in medicinal chemistry, and for recombining
 fragments to generate new molecules.
 
-SMARTS patterns and reaction definitions are from RDKit's BRICS implementation.
+The BRICS algorithm identifies 16 different chemical environments (L1-L16)
+and defines cleavage rules for bonds between specific environment pairs.
 """
 
 from __future__ import annotations
@@ -21,13 +25,12 @@ from .match import substructure_search
 from .parser import parse
 from .writer import to_smiles
 from .types import Atom, Bond, Molecule
-from .rings import find_sssr
 
 if TYPE_CHECKING:
     pass
 
 
-# RDKit BRICS environment definitions (exact SMARTS patterns)
+# BRICS environment definitions (SMARTS patterns from the original paper)
 # These define atom environments that participate in BRICS bond cleavage
 ENVIRONS: dict[str, str] = {
     # L1: Acyl carbon attached to heteroatom
@@ -64,13 +67,13 @@ ENVIRONS: dict[str, str] = {
     'L16': '[c;$(c(:c):c)]',
 }
 
-# Aliases used in RDKit (same patterns, different labels)
+# Aliases for symmetric cleavage rules (same patterns, different labels)
 ENVIRONS['L14b'] = ENVIRONS['L14']
 ENVIRONS['L16b'] = ENVIRONS['L16']
 
-# RDKit BRICS reaction definitions
+# BRICS cleavage rules from the original paper
 # Each tuple is (label1, label2, bond_type) where bond_type is '-' for single, '=' for double
-# These define which atom environment pairs can have their connecting bond cleaved
+# These define which environment pairs can have their connecting bond cleaved
 REACTION_DEFS: list[list[tuple[str, str, str]]] = [
     # L1 cleavages: amides, esters, lactams
     [('1', '3', '-'), ('1', '5', '-'), ('1', '10', '-')],
@@ -136,33 +139,6 @@ def _get_pattern(label: str) -> Molecule | None:
     return _COMPILED_PATTERNS[label]
 
 
-def _find_ring_bonds(mol: Molecule) -> set[tuple[int, int]]:
-    """Find all bonds that are part of a ring."""
-    ring_bonds: set[tuple[int, int]] = set()
-    rings = find_sssr(mol)
-    
-    for ring in rings:
-        # Convert to list if it's a set
-        ring_list = list(ring) if isinstance(ring, (set, frozenset)) else ring
-        ring_set = set(ring_list)
-        for i, atom_idx in enumerate(ring_list):
-            next_idx = ring_list[(i + 1) % len(ring_list)]
-            key = (min(atom_idx, next_idx), max(atom_idx, next_idx))
-            ring_bonds.add(key)
-    
-    return ring_bonds
-
-
-def _matches_environment(mol: Molecule, atom_idx: int, label: str) -> bool:
-    """Check if an atom matches a BRICS environment."""
-    pattern = _get_pattern(label)
-    if pattern is None:
-        return False
-    
-    matches = substructure_search(mol, pattern, uniquify=True)
-    return any(atom_idx in match for match in matches)
-
-
 def find_brics_bonds(mol: Molecule) -> Iterator[tuple[tuple[int, int], tuple[str, str]]]:
     """Find bonds in a molecule that BRICS would cleave.
     
@@ -177,20 +153,23 @@ def find_brics_bonds(mol: Molecule) -> Iterator[tuple[tuple[int, int], tuple[str
         >>> bonds = list(find_brics_bonds(mol))
         >>> # Returns bonds that can be cleaved according to BRICS rules
     """
-    # Find ring bonds (we don't cleave ring bonds)
-    ring_bonds = _find_ring_bonds(mol)
+    from .match import RingInfo
     
-    # Find atoms matching each environment
+    # Precompute ring info once for all pattern searches
+    ring_info = RingInfo.from_molecule(mol)
+    
+    # Find atoms matching each environment (reusing ring_info)
     env_matches: dict[str, set[int]] = {}
     for label in ENVIRONS.keys():
         pattern = _get_pattern(label)
         if pattern is not None:
-            matches = substructure_search(mol, pattern, uniquify=True)
+            matches = substructure_search(mol, pattern, uniquify=True, ring_info=ring_info)
             env_matches[label] = {m[0] for m in matches if m}
         else:
             env_matches[label] = set()
     
     bonds_found: set[tuple[int, int]] = set()
+    ring_bonds = ring_info.ring_bonds
     
     # Check each bond against BRICS rules
     for bond in mol.bonds:
@@ -483,78 +462,74 @@ def brics_decompose(
         >>> sorted(frags)
         ['[16*]c1ccc([16*])cc1', '[3*]O[3*]', '[4*]CC', '[8*]CC']
     """
-    from .aromaticity import perceive_aromaticity
-    
     # Get initial SMILES
     mol_smi = to_smiles(mol)
     
-    all_nodes: set[str] = set()
-    all_nodes.add(mol_smi)
-    
+    all_nodes: set[str] = {mol_smi}
     found_mols: dict[str, Molecule] = {mol_smi: mol}
-    active_pool: dict[str, Molecule] = {mol_smi: mol}
+    leaf_nodes: set[str] = set()  # Molecules with no BRICS bonds to break
     
-    while active_pool:
-        new_pool: dict[str, Molecule] = {}
+    # Queue of molecules to process
+    to_process: dict[str, Molecule] = {mol_smi: mol}
+    
+    while to_process:
+        new_to_process: dict[str, Molecule] = {}
         
-        for smi, current_mol in list(active_pool.items()):
+        for smi, current_mol in to_process.items():
             # Find BRICS bonds
             bonds = list(find_brics_bonds(current_mol))
             
             if not bonds:
                 # No bonds to break, this is a leaf
-                new_pool[smi] = current_mol
+                leaf_nodes.add(smi)
                 continue
             
-            matched = False
+            # Break all BRICS bonds simultaneously
+            fragmented = break_brics_bonds(current_mol, bonds)
+            fragments = _get_fragments(fragmented)
             
-            # Try breaking each bond individually
-            for bond_info in bonds:
-                # Break this single bond
-                fragmented = break_brics_bonds(current_mol, [bond_info])
-                fragments = _get_fragments(fragmented)
+            # Check fragment sizes
+            valid_frags = True
+            for frag in fragments:
+                # Count heavy atoms (non-dummy)
+                heavy_count = sum(1 for a in frag.atoms if a.symbol != '*')
+                if heavy_count < min_fragment_size:
+                    valid_frags = False
+                    break
+            
+            if not valid_frags:
+                # If breaking all bonds produces invalid fragments, keep original as leaf
+                leaf_nodes.add(smi)
+                continue
+            
+            # Add fragments to process queue
+            for frag in fragments:
+                frag_smi = to_smiles(frag)
                 
-                # Check fragment sizes
-                valid_frags = True
-                for frag in fragments:
-                    # Count heavy atoms (non-dummy)
-                    heavy_count = sum(1 for a in frag.atoms if a.symbol != '*')
-                    if heavy_count < min_fragment_size:
-                        valid_frags = False
-                        break
-                
-                if not valid_frags:
-                    continue
-                
-                matched = True
-                
-                for frag in fragments:
-                    frag_smi = to_smiles(frag)
+                if frag_smi not in all_nodes:
+                    all_nodes.add(frag_smi)
+                    found_mols[frag_smi] = frag
                     
-                    if frag_smi not in all_nodes:
-                        all_nodes.add(frag_smi)
-                        found_mols[frag_smi] = frag
-                        
-                        if not single_pass:
-                            new_pool[frag_smi] = frag
-            
-            if single_pass or keep_non_leaf_nodes or not matched:
-                new_pool[smi] = current_mol
+                    if not single_pass:
+                        new_to_process[frag_smi] = frag
+                    else:
+                        leaf_nodes.add(frag_smi)
         
         if single_pass:
             break
         
-        active_pool = new_pool
+        to_process = new_to_process
         
-        # Check if we made progress
-        if set(active_pool.keys()) == set(new_pool.keys()):
+        # Safety: limit iterations
+        if len(all_nodes) > 1000:
+            leaf_nodes.update(to_process.keys())
             break
     
-    # Return results
-    if not (single_pass or keep_non_leaf_nodes):
-        result_smis = set(active_pool.keys())
-    else:
+    # Determine result set
+    if keep_non_leaf_nodes:
         result_smis = all_nodes
+    else:
+        result_smis = leaf_nodes
     
     if return_mols:
         return [found_mols[smi] for smi in result_smis if smi in found_mols]

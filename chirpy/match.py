@@ -2,10 +2,10 @@
 SMARTS substructure matching.
 
 This module provides functionality for finding SMARTS pattern matches
-within molecules, similar to RDKit's GetSubstructMatches().
+within molecules using subgraph isomorphism.
 
-The implementation uses a VF2-like backtracking algorithm for subgraph
-isomorphism with SMARTS-specific atom and bond matching.
+The implementation uses a VF2-like backtracking algorithm with
+SMARTS-specific atom and bond matching constraints.
 
 Example:
     >>> from chirpy import parse
@@ -19,16 +19,57 @@ Example:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .rings import get_ring_info, get_ring_bonds
+from .rings import get_ring_info, get_ring_bonds, _find_ring_atoms_and_bonds_fast
 
 if TYPE_CHECKING:
     from .types import Atom, Bond, Molecule
 
 
+@dataclass(slots=True)
+class RingInfo:
+    """Precomputed ring information for a molecule.
+    
+    This allows efficient reuse of ring data across multiple 
+    substructure searches on the same molecule.
+    
+    Attributes:
+        ring_count: Dict mapping atom index to number of rings it's in.
+        ring_sizes: Dict mapping atom index to set of ring sizes it's in.
+        ring_bonds: Set of (min_idx, max_idx) tuples for bonds in rings.
+    """
+    ring_count: dict[int, int]
+    ring_sizes: dict[int, set[int]]
+    ring_bonds: set[tuple[int, int]]
+    
+    @classmethod
+    def from_molecule(cls, mol: "Molecule") -> "RingInfo":
+        """Compute ring info for a molecule.
+        
+        Optimized to call the fast ring detection algorithm only once.
+        """
+        # Compute ring atoms and bonds in one pass
+        ring_atoms, ring_bonds = _find_ring_atoms_and_bonds_fast(mol)
+        # Pass precomputed ring atoms to avoid recomputation
+        ring_count, ring_sizes = get_ring_info(mol, _ring_atoms=ring_atoms)
+        return cls(ring_count=ring_count, ring_sizes=ring_sizes, ring_bonds=ring_bonds)
+
+
 # Cache for parsed recursive SMARTS patterns
 _RECURSIVE_PATTERN_CACHE: dict[str, "Molecule"] = {}
+
+
+def _build_pattern_adj(pattern: "Molecule") -> dict[int, list[tuple[int, int]]]:
+    """Build pattern adjacency list."""
+    adj: dict[int, list[tuple[int, int]]] = {
+        i: [] for i in range(pattern.num_atoms)
+    }
+    for bond in pattern.bonds:
+        adj[bond.atom1_idx].append((bond.atom2_idx, bond.idx))
+        adj[bond.atom2_idx].append((bond.atom1_idx, bond.idx))
+    return adj
 
 
 def _matches_recursive_smarts(
@@ -57,7 +98,7 @@ def _matches_recursive_smarts(
     """
     from .parser import parse
     
-    # Get or parse the recursive pattern
+    # Get or parse the recursive pattern (cached)
     if recursive_smarts not in _RECURSIVE_PATTERN_CACHE:
         try:
             pattern = parse(f"[{recursive_smarts}]")
@@ -79,12 +120,10 @@ def _matches_recursive_smarts(
         return True
     
     # The atom at atom_idx must match the first atom of the recursive pattern
-    # and its local environment must match the rest of the pattern
     pattern_atom = pattern.atoms[0]
     mol_atom = mol.atoms[atom_idx]
     
-    # First check basic atom properties (non-recursive)
-    # Create a temporary pattern atom without recursive flag for basic matching
+    # First check basic atom properties (fast rejection)
     if pattern_atom.symbol != '*':
         if mol_atom.symbol.upper() != pattern_atom.symbol.upper():
             return False
@@ -119,30 +158,23 @@ def _matches_recursive_smarts(
     if pattern.num_atoms == 1:
         return True
     
-    # Otherwise, match the full pattern starting from this atom
     # Build pattern adjacency
-    pattern_adj: dict[int, list[tuple[int, int]]] = {
-        i: [] for i in range(pattern.num_atoms)
-    }
-    for bond in pattern.bonds:
-        pattern_adj[bond.atom1_idx].append((bond.atom2_idx, bond.idx))
-        pattern_adj[bond.atom2_idx].append((bond.atom1_idx, bond.idx))
+    pattern_adj = _build_pattern_adj(pattern)
     
     # Initialize ring bonds if not provided
     if mol_ring_bonds is None:
         mol_ring_bonds = get_ring_bonds(mol)
     
+    # Cache pattern size to avoid repeated property access
+    pattern_n = pattern.num_atoms
+    
     def try_match(mapping: dict[int, int], pattern_idx: int) -> bool:
         """Try to extend the mapping from pattern atoms to molecule atoms."""
-        if pattern_idx == pattern.num_atoms:
+        if pattern_idx == pattern_n:
             return True
         
         if pattern_idx == 0:
-            # First atom must be atom_idx
-            p_atom = pattern.atoms[0]
-            m_atom = mol.atoms[atom_idx]
-            
-            # Basic checks already done above
+            # First atom must be atom_idx - basic checks already done above
             mapping[0] = atom_idx
             return try_match(mapping, 1)
         
@@ -180,7 +212,7 @@ def _matches_recursive_smarts(
             for nbr_idx, bond_idx in pattern_adj[pattern_idx]:
                 if nbr_idx in mapping:
                     mol_nbr_idx = mapping[nbr_idx]
-                    mol_bond = _get_bond_between_atoms(mol, mol_idx, mol_nbr_idx)
+                    mol_bond = _get_bond_between(mol, mol_idx, mol_nbr_idx)
                     if mol_bond is None:
                         ok = False
                         break
@@ -296,8 +328,8 @@ def _bond_matches_internal(
     return False
 
 
-def _get_bond_between_atoms(mol: "Molecule", atom1_idx: int, atom2_idx: int) -> "Bond | None":
-    """Get the bond between two atoms."""
+def _get_bond_between(mol: "Molecule", atom1_idx: int, atom2_idx: int) -> "Bond | None":
+    """Get the bond between two atoms, or None if not bonded."""
     for bond_idx in mol.atoms[atom1_idx].bond_indices:
         bond = mol.bonds[bond_idx]
         if bond.other_atom(atom1_idx) == atom2_idx:
@@ -377,6 +409,11 @@ def _atom_matches(
         if mol_atom.charge != pattern_atom.charge:
             return False
     
+    # Explicit charge query (e.g., [+0] means charge must be exactly 0)
+    if pattern_atom.charge_query is not None:
+        if mol_atom.charge != pattern_atom.charge_query:
+            return False
+    
     # Ring membership (R, R0, R1, R2, ...)
     if pattern_atom.ring_count is not None:
         atom_ring_count = ring_count.get(mol_atom.idx, 0)
@@ -405,8 +442,13 @@ def _atom_matches(
             if pattern_atom.ring_size not in atom_ring_sizes:
                 return False
     
-    # Calculate total hydrogens for the molecule atom (needed for multiple queries)
-    mol_total_h = mol_atom.total_hydrogens(mol)
+    # Lazy calculation of total hydrogens (only when needed)
+    _mol_total_h: int | None = None
+    def get_mol_total_h() -> int:
+        nonlocal _mol_total_h
+        if _mol_total_h is None:
+            _mol_total_h = mol_atom.total_hydrogens(mol)
+        return _mol_total_h
     
     # Degree (D, D2, D3, ...) - number of explicit connections (not H)
     if pattern_atom.degree_query is not None:
@@ -423,7 +465,7 @@ def _atom_matches(
     if pattern_atom.connectivity_query is not None:
         # Connectivity = explicit bonds + total hydrogens
         explicit_bonds = len(mol_atom.bond_indices)
-        connectivity = explicit_bonds + mol_total_h
+        connectivity = explicit_bonds + get_mol_total_h()
         
         if pattern_atom.connectivity_query == -1:
             if connectivity == 0:
@@ -443,7 +485,7 @@ def _atom_matches(
             else:
                 valence += bond.order
         valence = int(valence + 0.5)  # Round
-        valence += mol_total_h
+        valence += get_mol_total_h()
         
         if pattern_atom.valence_query == -1:
             if valence == 0:
@@ -454,7 +496,7 @@ def _atom_matches(
     
     # Hydrogen count (H, H2, ...) - matches total hydrogens, not just explicit
     if pattern_atom.explicit_hydrogens > 0:
-        if mol_total_h != pattern_atom.explicit_hydrogens:
+        if get_mol_total_h() != pattern_atom.explicit_hydrogens:
             return False
     
     # Isotope
@@ -515,19 +557,11 @@ def _bond_matches(
     return False
 
 
-def _get_bond_between(mol: "Molecule", atom1_idx: int, atom2_idx: int) -> "Bond | None":
-    """Get the bond between two atoms, or None if not bonded."""
-    for bond_idx in mol.atoms[atom1_idx].bond_indices:
-        bond = mol.bonds[bond_idx]
-        if bond.other_atom(atom1_idx) == atom2_idx:
-            return bond
-    return None
-
-
 def substructure_search(
     mol: "Molecule",
     pattern: "Molecule",
     uniquify: bool = True,
+    ring_info: RingInfo | None = None,
 ) -> list[tuple[int, ...]]:
     """Find all matches of a SMARTS pattern in a molecule.
     
@@ -537,8 +571,10 @@ def substructure_search(
         mol: The molecule to search in.
         pattern: The SMARTS pattern to search for.
         uniquify: If True (default), return only one match per unique set
-            of molecule atoms (like RDKit's default). If False, return
-            all permutations of matches.
+            of molecule atoms. If False, return all permutations of matches.
+        ring_info: Optional precomputed ring info. If None, will be computed.
+            Pass this when doing multiple searches on the same molecule
+            for better performance.
     
     Returns:
         List of tuples, where each tuple contains the molecule atom
@@ -556,17 +592,20 @@ def substructure_search(
     if mol.num_atoms == 0:
         return []
     
-    # Precompute ring info for the molecule
-    ring_count, ring_sizes = get_ring_info(mol)
-    mol_ring_bonds = get_ring_bonds(mol)
+    # Use precomputed ring info or compute it
+    if ring_info is None:
+        ring_info = RingInfo.from_molecule(mol)
+    
+    ring_count = ring_info.ring_count
+    ring_sizes = ring_info.ring_sizes
+    mol_ring_bonds = ring_info.ring_bonds
     
     # Build pattern adjacency
-    pattern_adj: dict[int, list[tuple[int, int]]] = {
-        i: [] for i in range(pattern.num_atoms)
-    }
-    for bond in pattern.bonds:
-        pattern_adj[bond.atom1_idx].append((bond.atom2_idx, bond.idx))
-        pattern_adj[bond.atom2_idx].append((bond.atom1_idx, bond.idx))
+    pattern_adj = _build_pattern_adj(pattern)
+    
+    # Cache sizes to avoid repeated property access
+    pattern_n = pattern.num_atoms
+    mol_n = mol.num_atoms
     
     matches: list[tuple[int, ...]] = []
     seen_atom_sets: set[frozenset[int]] = set()  # For uniquify
@@ -576,9 +615,9 @@ def substructure_search(
         pattern_idx: int,
     ) -> None:
         """Recursively try to extend the mapping."""
-        if pattern_idx == pattern.num_atoms:
+        if pattern_idx == pattern_n:
             # Complete match found
-            match = tuple(mapping[i] for i in range(pattern.num_atoms))
+            match = tuple(mapping[i] for i in range(pattern_n))
             
             if uniquify:
                 # Only keep one match per unique set of molecule atoms
@@ -597,7 +636,7 @@ def substructure_search(
         
         if pattern_idx == 0:
             # First atom - try all molecule atoms
-            candidates = list(range(mol.num_atoms))
+            candidates = list(range(mol_n))
         else:
             # Find neighbors in pattern that are already mapped
             candidates_set: set[int] | None = None
@@ -628,7 +667,7 @@ def substructure_search(
                 # No mapped neighbors - disconnected pattern component
                 # Try all unmatched atoms
                 used = set(mapping.values())
-                candidates = [i for i in range(mol.num_atoms) if i not in used]
+                candidates = [i for i in range(mol_n) if i not in used]
             else:
                 candidates = list(candidates_set)
         
@@ -673,7 +712,11 @@ def substructure_search(
     return matches
 
 
-def has_substructure(mol: "Molecule", pattern: "Molecule") -> bool:
+def has_substructure(
+    mol: "Molecule",
+    pattern: "Molecule",
+    ring_info: RingInfo | None = None,
+) -> bool:
     """Check if a molecule contains a SMARTS pattern.
     
     This is more efficient than substructure_search when you only
@@ -682,6 +725,7 @@ def has_substructure(mol: "Molecule", pattern: "Molecule") -> bool:
     Args:
         mol: The molecule to search in.
         pattern: The SMARTS pattern to search for.
+        ring_info: Optional precomputed ring info for performance.
     
     Returns:
         True if the pattern is found in the molecule.
@@ -698,26 +742,29 @@ def has_substructure(mol: "Molecule", pattern: "Molecule") -> bool:
     if mol.num_atoms == 0:
         return False
     
-    # Precompute ring info
-    ring_count, ring_sizes = get_ring_info(mol)
-    mol_ring_bonds = get_ring_bonds(mol)
+    # Use precomputed ring info or compute it
+    if ring_info is None:
+        ring_info = RingInfo.from_molecule(mol)
+    
+    ring_count = ring_info.ring_count
+    ring_sizes = ring_info.ring_sizes
+    mol_ring_bonds = ring_info.ring_bonds
     
     # Build pattern adjacency
-    pattern_adj: dict[int, list[tuple[int, int]]] = {
-        i: [] for i in range(pattern.num_atoms)
-    }
-    for bond in pattern.bonds:
-        pattern_adj[bond.atom1_idx].append((bond.atom2_idx, bond.idx))
-        pattern_adj[bond.atom2_idx].append((bond.atom1_idx, bond.idx))
+    pattern_adj = _build_pattern_adj(pattern)
+    
+    # Cache sizes to avoid repeated property access
+    pattern_n = pattern.num_atoms
+    mol_n = mol.num_atoms
     
     def backtrack(mapping: dict[int, int], pattern_idx: int) -> bool:
-        if pattern_idx == pattern.num_atoms:
+        if pattern_idx == pattern_n:
             return True
         
         pattern_atom = pattern.atoms[pattern_idx]
         
         if pattern_idx == 0:
-            candidates = list(range(mol.num_atoms))
+            candidates = list(range(mol_n))
         else:
             candidates_set: set[int] | None = None
             
@@ -742,7 +789,7 @@ def has_substructure(mol: "Molecule", pattern: "Molecule") -> bool:
             
             if candidates_set is None:
                 used = set(mapping.values())
-                candidates = [i for i in range(mol.num_atoms) if i not in used]
+                candidates = [i for i in range(mol_n) if i not in used]
             else:
                 candidates = list(candidates_set)
         
