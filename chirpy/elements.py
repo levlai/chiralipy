@@ -424,20 +424,25 @@ def can_be_sp2(atomic_num: int, total_bonds: int, charge: int = 0) -> bool:
     if atomic_num not in AROMATIC_CAPABLE_ELEMENTS:
         return False
     
-    group = ELEMENT_GROUPS.get(atomic_num)
-    if group is None:
+    outer_e = get_outer_electrons(atomic_num)
+    if outer_e == 0:
         return False
     
-    max_degree = MAX_SP2_DEGREE.get(group, 3)
+    # Max degree depends on number of lone pairs in sp2 hybridization
+    # 3-5 valence electrons: 3 sp2 orbitals can be used for bonding (0-1 lone pairs)
+    # 6 valence electrons: 2 sp2 orbitals for bonding, 1 for lone pair (plus p orbital lone pair)
+    max_degree = 3
+    if outer_e == 6:
+        max_degree = 2
     
     # Charge affects electron count and thus max bonds
     # Positive charge: fewer electrons, can accommodate more bonds in some cases
     # Negative charge: more electrons, may limit bonds
     effective_max = max_degree
-    if group == 14 and charge == 1:  # Carbocation
+    if outer_e == 4 and charge == 1:  # Carbocation
         effective_max = 3  # Still 3 bonds but empty p orbital
-    elif group == 15 and charge == 1:  # Quaternary N+
-        effective_max = 4  # Can have 4 bonds
+    elif outer_e == 5 and charge == 1:  # Quaternary N+
+        effective_max = 4  # Can have 4 bonds (isoelectronic with C)
     
     return total_bonds <= effective_max
 
@@ -468,10 +473,15 @@ def get_max_sp2_degree(atomic_num: int) -> int:
     Returns:
         Maximum degree (number of bonds) for sp2.
     """
-    group = ELEMENT_GROUPS.get(atomic_num)
-    if group is None:
+    outer_e = get_outer_electrons(atomic_num)
+    if outer_e == 0:
         return 0
-    return MAX_SP2_DEGREE.get(group, 3)
+        
+    # Elements with 6 valence electrons (Group 16) have max degree 2
+    if outer_e == 6:
+        return 2
+    # Others (Groups 13, 14, 15) have max degree 3
+    return 3
 
 
 def get_pi_contribution(
@@ -516,22 +526,23 @@ def get_pi_contribution(
         - If fixed is None, atom cannot be aromatic.
     """
     outer_e = OUTER_ELECTRONS.get(atomic_num, 0)
-    group = ELEMENT_GROUPS.get(atomic_num)
     
-    if group is None or outer_e == 0:
+    if outer_e == 0:
         # Unknown element - assume can contribute 1 if has pi bond
         return (1, None) if has_pi_bond else (None, None)
     
     # Adjust outer electrons for formal charge
     effective_outer_e = outer_e - charge
     
-    # Group 13 (3 outer e⁻): All electrons in σ bonds, empty p orbital
+    # Elements with 3 outer electrons (Group 13: B, Al, etc.)
+    # All electrons in σ bonds, empty p orbital
     # Contributes 0 electrons but provides orbital for conjugation
-    if group == 13:
+    if outer_e == 3:
         return (0, None)
     
-    # Group 14 (4 outer e⁻): sp2 uses 3 for σ, leaves 1 for π
-    if group == 14:
+    # Elements with 4 outer electrons (Group 14: C, Si, etc.)
+    # sp2 uses 3 for σ, leaves 1 for π
+    if outer_e == 4:
         if charge == 1:
             # Carbocation: 3 outer e⁻, all in σ bonds, empty p orbital
             return (0, None)
@@ -545,21 +556,12 @@ def get_pi_contribution(
             # No pi bonds - likely sp3, cannot be aromatic
             return (None, None)
     
-    # Group 15 (5 outer e⁻): Complex - depends on bonding pattern
+    # Elements with 5 outer electrons (Group 15: N, P, etc.)
+    # Complex - depends on bonding pattern
     # Can be pyridine-like (1 π) or pyrrole-like (2 π)
-    # 
-    # Pyridine-like: =N- with 3 σ bonds
-    #   5 outer e⁻ - 3 σ bonds = 2 remaining
-    #   1 electron in p orbital (π), 1 lone pair in sp2 orbital (in plane)
-    #   Contributes: 1 π electron
-    #
-    # Pyrrole-like: -NH- with 2 σ bonds + 1 H
-    #   5 outer e⁻ - 3 σ bonds (including N-H) = 2 remaining
-    #   Both electrons in p orbital as lone pair
-    #   Contributes: 2 π electrons
-    if group == 15:
+    if outer_e == 5:
         if charge == 1:
-            # N⁺: 4 outer e⁻
+            # N⁺: 4 outer e⁻ (isoelectronic with C)
             # If has pi bond: 3 in σ, 1 in π → 1 electron
             # Else: 2 in σ, 2 in lone pair → 2 electrons
             if has_pi_bond:
@@ -590,12 +592,13 @@ def get_pi_contribution(
             else:
                 return (2, None)  # Default pyrrole-like
     
-    # Group 16 (6 outer e⁻): Furan/thiophene-like
+    # Elements with 6 outer electrons (Group 16: O, S, etc.)
+    # Furan/thiophene-like
     # sp2: 2 σ bonds use 2 electrons
     # Remaining 4 electrons: 2 lone pairs
     # One lone pair in p orbital (π system), one in sp2 orbital (in plane)
     # Contributes: 2 π electrons
-    if group == 16:
+    if outer_e == 6:
         if charge == 1:
             # O⁺/S⁺: 5 outer e⁻, 2 in σ, can have 1 in π
             return (1, None)
@@ -609,6 +612,6 @@ def get_pi_contribution(
             # Furan-like: lone pair contributes 2 electrons
             return (2, None)
     
-    # Group 17 (7 outer e⁻): Halogens
+    # Elements with 7 outer electrons (Group 17: Halogens)
     # Generally cannot be sp2 in rings - too many lone pairs
     return (None, None)

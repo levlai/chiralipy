@@ -217,14 +217,17 @@ class AromaticityPerceiver:
             # Use element-based pi contribution calculation
             # For Group 14 (C), being in an aromatic ring counts as having pi bond
             # For Group 16 (O, S), only explicit double bonds count
-            from .elements import ELEMENT_GROUPS
-            group = ELEMENT_GROUPS.get(atomic_num)
+            from .elements import get_outer_electrons
+            outer_e = get_outer_electrons(atomic_num)
             
-            if group == 16:
-                # O, S, Se: only count explicit double bonds, not aromatic membership
+            # Elements with 6 valence electrons (Group 16: O, S, Se) typically contribute
+            # 2 electrons (lone pair) to the aromatic system, not 1 (pi bond).
+            # They only have a "pi bond" contribution if explicitly double bonded.
+            if outer_e == 6:
                 has_pi_bond = ring_double >= 1 or has_exo_double
             else:
-                # C, N, etc: aromatic ring membership counts
+                # Elements with < 6 valence electrons (C, N) typically contribute 1 electron
+                # via a pi bond, so aromatic membership implies a pi bond exists.
                 has_pi_bond = has_ring_pi or was_aromatic or has_exo_double
             
             contribution = get_pi_contribution(

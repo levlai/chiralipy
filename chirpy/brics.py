@@ -93,6 +93,8 @@ for rule_group in REACTION_DEFS:
 ATOM_ENVIRONS = ENVIRONS
 
 _COMPILED_PATTERNS: dict[str, Molecule | None] = {}
+_PATTERNS_BY_SYMBOL: dict[str, list[str]] | None = None
+_PATTERNS_WILDCARD: list[str] | None = None
 
 
 def _get_pattern(label: str) -> Molecule | None:
@@ -111,6 +113,32 @@ def _get_pattern(label: str) -> Molecule | None:
     return _COMPILED_PATTERNS[label]
 
 
+def _ensure_pattern_groups():
+    """Initialize pattern groups for fast lookup."""
+    global _PATTERNS_BY_SYMBOL, _PATTERNS_WILDCARD
+    if _PATTERNS_BY_SYMBOL is not None:
+        return
+        
+    _PATTERNS_BY_SYMBOL = {}
+    _PATTERNS_WILDCARD = []
+    
+    for label in ENVIRONS:
+        pattern = _get_pattern(label)
+        if pattern is None or pattern.num_atoms == 0:
+            continue
+            
+        first_atom = pattern.atoms[0]
+        if first_atom.is_wildcard or first_atom.symbol == '*':
+            _PATTERNS_WILDCARD.append(label)
+        elif first_atom.atom_list:
+             _PATTERNS_WILDCARD.append(label)
+        else:
+            symbol = first_atom.symbol.upper()
+            if symbol not in _PATTERNS_BY_SYMBOL:
+                _PATTERNS_BY_SYMBOL[symbol] = []
+            _PATTERNS_BY_SYMBOL[symbol].append(label)
+
+
 def find_brics_bonds(mol: Molecule) -> Iterator[tuple[tuple[int, int], tuple[str, str]]]:
     """Find bonds in a molecule that BRICS would cleave.
     
@@ -125,18 +153,24 @@ def find_brics_bonds(mol: Molecule) -> Iterator[tuple[tuple[int, int], tuple[str
         >>> bonds = list(find_brics_bonds(mol))
         >>> # Returns bonds that can be cleaved according to BRICS rules
     """
-    from .match import RingInfo
+    from .match import RingInfo, match_at_root
 
     ring_info = RingInfo.from_molecule(mol)
+    _ensure_pattern_groups()
     
-    env_matches: dict[str, set[int]] = {}
-    for label in ENVIRONS.keys():
-        pattern = _get_pattern(label)
-        if pattern is not None:
-            matches = substructure_search(mol, pattern, uniquify=True, ring_info=ring_info)
-            env_matches[label] = {m[0] for m in matches if m}
-        else:
-            env_matches[label] = set()
+    env_matches: dict[str, set[int]] = {label: set() for label in ENVIRONS}
+    
+    # Iterate over atoms and check relevant patterns
+    for atom in mol.atoms:
+        symbol = atom.symbol.upper()
+        candidates = _PATTERNS_BY_SYMBOL.get(symbol, [])
+        if _PATTERNS_WILDCARD:
+            candidates = candidates + _PATTERNS_WILDCARD
+        
+        for label in candidates:
+            pattern = _get_pattern(label)
+            if pattern and match_at_root(mol, atom.idx, pattern, ring_info):
+                env_matches[label].add(atom.idx)
     
     bonds_found: set[tuple[int, int]] = set()
     ring_bonds = ring_info.ring_bonds
@@ -390,13 +424,13 @@ def brics_decompose(
 ) -> set[str] | list[Molecule]:
     """Perform BRICS decomposition on a molecule.
     
-    Recursively breaks BRICS bonds to generate fragments.
+    Identifies and breaks all BRICS bonds in the molecule.
     
     Args:
         mol: Molecule to decompose.
         min_fragment_size: Minimum number of heavy atoms in a fragment.
-        keep_non_leaf_nodes: If True, include intermediate fragments.
-        single_pass: If True, only do one round of decomposition.
+        keep_non_leaf_nodes: If True, include the original molecule in output.
+        single_pass: Deprecated, has no effect (algorithm is always single-pass).
         return_mols: If True, return Molecule objects instead of SMILES.
     
     Returns:
@@ -410,65 +444,34 @@ def brics_decompose(
     """
     mol_smi = to_smiles(mol)
     
-    all_nodes: set[str] = {mol_smi}
-    found_mols: dict[str, Molecule] = {mol_smi: mol}
-    leaf_nodes: set[str] = set()
-    to_process: dict[str, Molecule] = {mol_smi: mol}
+    # Find all cleavable bonds
+    bonds = list(find_brics_bonds(mol))
     
-    while to_process:
-        new_to_process: dict[str, Molecule] = {}
-        
-        for smi, current_mol in to_process.items():
-            bonds = list(find_brics_bonds(current_mol))
-            
-            if not bonds:
-                leaf_nodes.add(smi)
-                continue
-            
-            fragmented = break_brics_bonds(current_mol, bonds)
-            fragments = _get_fragments(fragmented)
-            
-            valid_frags = True
-            for frag in fragments:
-                heavy_count = sum(1 for a in frag.atoms if a.symbol != '*')
-                if heavy_count < min_fragment_size:
-                    valid_frags = False
-                    break
-            
-            if not valid_frags:
-                leaf_nodes.add(smi)
-                continue
-            
-            for frag in fragments:
-                frag_smi = to_smiles(frag)
-                
-                if frag_smi not in all_nodes:
-                    all_nodes.add(frag_smi)
-                    found_mols[frag_smi] = frag
-                    
-                    if not single_pass:
-                        new_to_process[frag_smi] = frag
-                    else:
-                        leaf_nodes.add(frag_smi)
-        
-        if single_pass:
-            break
-        
-        to_process = new_to_process
-        
-        if len(all_nodes) > 1000:
-            leaf_nodes.update(to_process.keys())
-            break
+    if not bonds:
+        if return_mols:
+            return [mol]
+        return {mol_smi}
     
+    # Break all bonds simultaneously
+    fragmented = break_brics_bonds(mol, bonds)
+    fragments = _get_fragments(fragmented)
+    
+    # Filter fragments by size
+    valid_fragments = []
+    for frag in fragments:
+        heavy_count = sum(1 for a in frag.atoms if a.symbol != '*')
+        if heavy_count >= min_fragment_size:
+            valid_fragments.append(frag)
+            
     if keep_non_leaf_nodes:
-        result_smis = all_nodes
-    else:
-        result_smis = leaf_nodes
+        if return_mols:
+            # Note: returning deepcopy of mol to be safe, though not strictly necessary if caller doesn't mutate
+            return [mol] + valid_fragments
+        return {mol_smi} | {to_smiles(f) for f in valid_fragments}
     
     if return_mols:
-        return [found_mols[smi] for smi in result_smis if smi in found_mols]
-    else:
-        return result_smis
+        return valid_fragments
+    return {to_smiles(f) for f in valid_fragments}
 
 
 BRICSDecompose = brics_decompose

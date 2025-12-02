@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chirpy"
-version = "0.3.0"
+version = "0.1.0"
 description = "Pure Python SMILES/SMARTS chemistry library with zero dependencies"
 readme = "README.md"
 license = "MIT"

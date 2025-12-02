@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 
 from .elements import (
     AROMATIC_CAPABLE_ELEMENTS,
-    ELEMENT_GROUPS,
     get_atomic_number,
     get_outer_electrons,
 )
@@ -67,10 +66,9 @@ def _atom_needs_double_bond(
         # Non-aromatic element - shouldn't happen but assume needs double
         return True, False
     
-    group = ELEMENT_GROUPS.get(atomic_num)
     outer_e = get_outer_electrons(atomic_num)
     
-    if group is None or outer_e == 0:
+    if outer_e == 0:
         return True, False
     
     # Get charge
@@ -99,13 +97,14 @@ def _atom_needs_double_bond(
     # Positive charge: lose electron, negative: gain electron
     effective_outer_e = outer_e - charge
     
-    # Group 13 (B): 3 outer electrons, all in σ bonds, empty p orbital
+    # Elements with 3 outer electrons (Group 13: B)
+    # All electrons in σ bonds, empty p orbital
     # Contributes 0 π electrons → doesn't need double bond
-    if group == 13:
+    if outer_e == 3:
         return False, False
     
-    # Group 14 (C, Si, Ge): 4 outer electrons
-    if group == 14:
+    # Elements with 4 outer electrons (Group 14: C, Si, Ge)
+    if outer_e == 4:
         if charge == 1:
             # Carbocation: 3 outer e⁻, empty p orbital → 0 π electrons
             return False, False
@@ -117,8 +116,8 @@ def _atom_needs_double_bond(
             # Needs exactly 1 double bond to complete π system
             return True, False
     
-    # Group 15 (N, P, As): 5 outer electrons - most complex case
-    if group == 15:
+    # Elements with 5 outer electrons (Group 15: N, P, As)
+    if outer_e == 5:
         if charge == 1:
             # N⁺: 4 outer electrons (like carbon)
             # In aromatic ring, behaves like carbon → needs double bond
@@ -149,11 +148,11 @@ def _atom_needs_double_bond(
                 # Default to pyrrole-like
                 return False, False
     
-    # Group 16 (O, S, Se, Te): 6 outer electrons
+    # Elements with 6 outer electrons (Group 16: O, S, Se, Te)
     # Furan/thiophene-like: 2 σ bonds, 2 lone pairs
     # One lone pair contributes to π system → 2 π electrons
     # → doesn't need double bond
-    if group == 16:
+    if outer_e == 6:
         if charge == 1:
             # O⁺/S⁺: 5 outer electrons, can participate in double bond
             return True, False

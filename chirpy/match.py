@@ -832,6 +832,134 @@ def has_substructure(
     return backtrack({}, 0)
 
 
+def match_at_root(
+    mol: "Molecule",
+    atom_idx: int,
+    pattern: "Molecule",
+    ring_info: RingInfo | None = None,
+    pattern_adj: dict[int, list[tuple[int, int]]] | None = None,
+) -> bool:
+    """Check if a pattern matches starting at a specific molecule atom.
+    
+    The first atom of the pattern (index 0) is anchored to the specified
+    molecule atom.
+    
+    Args:
+        mol: The molecule to search in.
+        atom_idx: The index of the molecule atom to anchor to.
+        pattern: The SMARTS pattern to search for.
+        ring_info: Optional precomputed ring info.
+        pattern_adj: Optional precomputed pattern adjacency list.
+    
+    Returns:
+        True if the pattern matches anchored at atom_idx.
+    """
+    if pattern.num_atoms == 0:
+        return True
+    
+    if atom_idx >= mol.num_atoms:
+        return False
+        
+    # Use precomputed ring info or compute it
+    if ring_info is None:
+        ring_info = RingInfo.from_molecule(mol)
+    
+    ring_count = ring_info.ring_count
+    ring_sizes = ring_info.ring_sizes
+    mol_ring_bonds = ring_info.ring_bonds
+    
+    # Check root atom first (fast fail)
+    if not _atom_matches(mol.atoms[atom_idx], pattern.atoms[0], mol, ring_count, ring_sizes, mol_ring_bonds):
+        return False
+        
+    if pattern.num_atoms == 1:
+        return True
+    
+    # Build pattern adjacency if not provided
+    if pattern_adj is None:
+        pattern_adj = _build_pattern_adj(pattern)
+    
+    pattern_n = pattern.num_atoms
+    
+    def backtrack(mapping: dict[int, int], pattern_idx: int) -> bool:
+        if pattern_idx == pattern_n:
+            return True
+        
+        pattern_atom = pattern.atoms[pattern_idx]
+        
+        # pattern_idx 0 is already matched to atom_idx
+        if pattern_idx == 0:
+            mapping[0] = atom_idx
+            return backtrack(mapping, 1)
+            
+        candidates_set: set[int] | None = None
+        
+        for nbr_idx, bond_idx in pattern_adj[pattern_idx]:
+            if nbr_idx in mapping:
+                mol_nbr_idx = mapping[nbr_idx]
+                mol_atom = mol.atoms[mol_nbr_idx]
+                
+                nbr_candidates: set[int] = set()
+                for mol_bond_idx in mol_atom.bond_indices:
+                    mol_bond = mol.bonds[mol_bond_idx]
+                    mol_other = mol_bond.other_atom(mol_nbr_idx)
+                    
+                    pattern_bond = pattern.bonds[bond_idx]
+                    if _bond_matches(mol_bond, pattern_bond, mol_ring_bonds):
+                        nbr_candidates.add(mol_other)
+                
+                if candidates_set is None:
+                    candidates_set = nbr_candidates
+                else:
+                    candidates_set &= nbr_candidates
+        
+        candidates: list[int]
+        if candidates_set is None:
+            # Disconnected component in pattern (unlikely for BRICS but possible)
+            used = set(mapping.values())
+            candidates = [i for i in range(mol.num_atoms) if i not in used]
+        else:
+            candidates = list(candidates_set)
+        
+        used = set(mapping.values())
+        
+        for mol_idx in candidates:
+            if mol_idx in used:
+                continue
+            
+            mol_atom = mol.atoms[mol_idx]
+            
+            if not _atom_matches(mol_atom, pattern_atom, mol, ring_count, ring_sizes, mol_ring_bonds):
+                continue
+            
+            bonds_ok = True
+            for nbr_idx, bond_idx in pattern_adj[pattern_idx]:
+                if nbr_idx in mapping:
+                    mol_nbr_idx = mapping[nbr_idx]
+                    mol_bond = _get_bond_between(mol, mol_idx, mol_nbr_idx)
+                    
+                    if mol_bond is None:
+                        bonds_ok = False
+                        break
+                    
+                    pattern_bond = pattern.bonds[bond_idx]
+                    if not _bond_matches(mol_bond, pattern_bond, mol_ring_bonds):
+                        bonds_ok = False
+                        break
+            
+            if not bonds_ok:
+                continue
+            
+            mapping[pattern_idx] = mol_idx
+            if backtrack(mapping, pattern_idx + 1):
+                return True
+            del mapping[pattern_idx]
+        
+        return False
+    
+    return backtrack({}, 0)
+
+
 def count_matches(mol: "Molecule", pattern: "Molecule") -> int:
     """Count the number of SMARTS pattern matches in a molecule.
     
