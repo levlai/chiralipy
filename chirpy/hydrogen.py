@@ -8,12 +8,8 @@ from molecular structures.
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import TYPE_CHECKING
 
 from .types import Atom, Bond, Molecule
-
-if TYPE_CHECKING:
-    pass
 
 
 def add_explicit_hydrogens(mol: Molecule) -> Molecule:
