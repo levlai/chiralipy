@@ -359,31 +359,3 @@ class TestBRICSEnvironments:
         
         # Should find Ar-C bond as cleavable
         assert len(bonds) >= 1
-
-
-class TestBRICSCompatibilityAliases:
-    """Test RDKit-style function aliases."""
-    
-    def test_FindBRICSBonds_alias(self) -> None:
-        """Test FindBRICSBonds alias works."""
-        from chirpy.brics import FindBRICSBonds
-        
-        mol = parse("CCCOCC")
-        bonds = list(FindBRICSBonds(mol))
-        assert len(bonds) >= 1
-    
-    def test_BreakBRICSBonds_alias(self) -> None:
-        """Test BreakBRICSBonds alias works."""
-        from chirpy.brics import BreakBRICSBonds
-        
-        mol = parse("CCCOCC")
-        fragmented = BreakBRICSBonds(mol)
-        assert fragmented.num_atoms >= mol.num_atoms
-    
-    def test_BRICSDecompose_alias(self) -> None:
-        """Test BRICSDecompose alias works."""
-        from chirpy.brics import BRICSDecompose
-        
-        mol = parse("CCCOCC")
-        fragments = BRICSDecompose(mol)
-        assert len(fragments) >= 1

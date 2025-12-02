@@ -16,11 +16,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from .elements import can_be_aromatic, get_pi_contribution, get_atomic_number
+from .elements import get_pi_contribution, get_atomic_number
 from .rings import find_sssr, find_ring_systems
 
 if TYPE_CHECKING:
-    from .types import Atom, Bond, Molecule
+    from .types import Molecule
 
 
 @runtime_checkable
@@ -71,33 +71,22 @@ class AromaticityPerceiver:
         Args:
             mol: Molecule to analyze (modified in-place).
         """
-        # Save aromatic info from parsing (lowercase letters in SMILES)
-        # This is needed because we'll use it for pi electron counting
-        # Note: Aromatic atoms can be indicated by:
-        #   1. a.is_aromatic being True/truthy
-        #   2. lowercase symbol (e.g., 'c' for aromatic carbon)
         parsed_aromatic_atoms = {
             i for i, a in enumerate(mol.atoms) 
             if a.is_aromatic or (a.symbol and a.symbol[0].islower())
         }
         parsed_aromatic_bonds = {i for i, b in enumerate(mol.bonds) if b.is_aromatic}
         
-        # Reset all aromaticity flags (we'll recompute)
         for atom in mol.atoms:
             atom.is_aromatic = False
         for bond in mol.bonds:
             bond.is_aromatic = False
         
-        # Find all rings using shared ring detection
         rings = find_sssr(mol, self._max_ring_size)
-        
         if not rings:
             return
         
-        # Group rings into fused systems
         ring_systems = find_ring_systems(rings)
-        
-        # Process each ring system
         for system in ring_systems:
             self._process_ring_system(mol, system, parsed_aromatic_atoms, parsed_aromatic_bonds)
     
@@ -130,20 +119,15 @@ class AromaticityPerceiver:
         if parsed_aromatic_bonds is None:
             parsed_aromatic_bonds = set()
         
-        # Get all atoms in the system
         system_atoms: set[int] = set()
         for ring in rings:
             system_atoms |= ring
         
-        # Get pi contribution info for all atoms
         atom_info = self._get_atom_pi_info(mol, system_atoms, parsed_aromatic_atoms, parsed_aromatic_bonds)
-        
-        # Try to find a valid electron assignment for the whole system
         aromatic_atoms = self._try_find_aromatic_assignment(
             mol, rings, system_atoms, atom_info
         )
         
-        # Mark aromatic atoms and bonds
         if aromatic_atoms:
             self._mark_aromatic(mol, aromatic_atoms)
     
@@ -179,8 +163,6 @@ class AromaticityPerceiver:
             atom = mol.atoms[idx]
             atomic_num = get_atomic_number(atom.symbol)
             charge = atom.charge
-            
-            # Count bonds
             ring_double = 0
             ring_aromatic = 0
             exo_double = 0
@@ -261,17 +243,13 @@ class AromaticityPerceiver:
         Returns:
             Set of aromatic atoms, or empty set if not aromatic.
         """
-        # Find atoms with ambiguous contributions
-        ambiguous_atoms = [idx for idx, (_, opt) in atom_info.items() if opt is not None]
-        
-        # Generate all possible assignments
         from itertools import product
         
+        ambiguous_atoms = [idx for idx, (_, opt) in atom_info.items() if opt is not None]
+        
         if not ambiguous_atoms:
-            # No ambiguous atoms, just check if any ring satisfies Hückel
             choices = [{}]
         else:
-            # Generate all combinations of choices for ambiguous atoms
             options = []
             for idx in ambiguous_atoms:
                 fixed, opt = atom_info[idx]
@@ -282,14 +260,11 @@ class AromaticityPerceiver:
                 choice = {idx: val for idx, val in combo}
                 choices.append(choice)
         
-        # Find the best assignment (most rings satisfied)
         best_aromatic = set()
         best_ring_count = 0
         
         for choice in choices:
-            # Calculate pi electrons for each ring with this assignment
             valid_rings = []
-            
             for ring in rings:
                 pi = 0
                 valid = True
@@ -312,12 +287,10 @@ class AromaticityPerceiver:
             if not valid_rings:
                 continue
             
-            # Calculate union of valid rings
             aromatic = set()
             for ring in valid_rings:
                 aromatic |= ring
             
-            # Prefer assignments that make more rings valid and cover more atoms
             if len(valid_rings) > best_ring_count or (
                 len(valid_rings) == best_ring_count and len(aromatic) > len(best_aromatic)
             ):
@@ -347,15 +320,12 @@ class AromaticityPerceiver:
             mol: Parent molecule.
             atoms: Set of aromatic atom indices.
         """
-        # Mark atoms
         for idx in atoms:
             mol.atoms[idx].is_aromatic = True
         
-        # Mark bonds between aromatic atoms
         for bond in mol.bonds:
             if bond.atom1_idx in atoms and bond.atom2_idx in atoms:
                 bond.is_aromatic = True
-                # Note: bond order stays as-is for now; writer handles display
 
 
 def perceive_aromaticity(

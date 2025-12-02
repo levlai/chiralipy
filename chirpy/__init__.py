@@ -30,7 +30,7 @@ pure Python for easy deployment and modification.
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.1.0"
 __author__ = "Vladimir Lekić"
 __all__ = [
     # Core types

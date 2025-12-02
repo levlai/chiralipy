@@ -21,7 +21,6 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Iterator
 
-from .match import substructure_search
 from .parser import parse
 from .writer import to_smiles
 from .types import Atom, Bond, Molecule
@@ -89,6 +88,11 @@ for rule_group in REACTION_DEFS:
         l1 = f'L{label1}' if not label1.startswith('L') else label1
         l2 = f'L{label2}' if not label2.startswith('L') else label2
         BRICS_RULES.append((l1, l2, bond_order))
+
+# Pre-group BRICS rules by expected bond order for faster lookup
+BRICS_RULES_BY_ORDER: dict[int, list[tuple[str, str]]] = {1: [], 2: []}
+for label1, label2, order in BRICS_RULES:
+    BRICS_RULES_BY_ORDER[order].append((label1, label2))
 
 ATOM_ENVIRONS = ENVIRONS
 
@@ -175,6 +179,9 @@ def find_brics_bonds(mol: Molecule) -> Iterator[tuple[tuple[int, int], tuple[str
     bonds_found: set[tuple[int, int]] = set()
     ring_bonds = ring_info.ring_bonds
     
+    # Pre-compute label numeric parts to avoid repeated string operations
+    label_nums: dict[str, str] = {label: ''.join(c for c in label if c.isdigit()) for label in ENVIRONS}
+    
     for bond in mol.bonds:
         atom1_idx = bond.atom1_idx
         atom2_idx = bond.atom2_idx
@@ -186,23 +193,23 @@ def find_brics_bonds(mol: Molecule) -> Iterator[tuple[tuple[int, int], tuple[str
         if bond_key in bonds_found:
             continue
         
-        for label1, label2, expected_order in BRICS_RULES:
-            if bond.order != expected_order:
-                continue
+        # Get rules for this bond order only (avoids checking order for every rule)
+        rules_for_order = BRICS_RULES_BY_ORDER.get(bond.order)
+        if not rules_for_order:
+            continue
+        
+        for label1, label2 in rules_for_order:
+            # Direct access to pre-initialized sets (no .get() allocation)
+            set1 = env_matches[label1]
+            set2 = env_matches[label2]
             
-            if atom1_idx in env_matches.get(label1, set()) and \
-               atom2_idx in env_matches.get(label2, set()):
+            if atom1_idx in set1 and atom2_idx in set2:
                 bonds_found.add(bond_key)
-                num1 = ''.join(c for c in label1 if c.isdigit())
-                num2 = ''.join(c for c in label2 if c.isdigit())
-                yield ((atom1_idx, atom2_idx), (num1, num2))
+                yield ((atom1_idx, atom2_idx), (label_nums[label1], label_nums[label2]))
                 break
-            elif atom2_idx in env_matches.get(label1, set()) and \
-                 atom1_idx in env_matches.get(label2, set()):
+            elif atom2_idx in set1 and atom1_idx in set2:
                 bonds_found.add(bond_key)
-                num1 = ''.join(c for c in label1 if c.isdigit())
-                num2 = ''.join(c for c in label2 if c.isdigit())
-                yield ((atom2_idx, atom1_idx), (num1, num2))
+                yield ((atom2_idx, atom1_idx), (label_nums[label1], label_nums[label2]))
                 break
 
 
@@ -332,32 +339,36 @@ def _get_fragments(mol: Molecule) -> list[Molecule]:
     Returns:
         List of fragment molecules.
     """
-    if mol.num_atoms == 0:
+    num_atoms = mol.num_atoms
+    if num_atoms == 0:
         return []
     
-    visited: set[int] = set()
+    # Use list[bool] instead of set[int] for O(1) access without hashing
+    visited: list[bool] = [False] * num_atoms
     components: list[set[int]] = []
+    atoms = mol.atoms  # Local reference for faster access
+    bonds = mol.bonds
     
     def dfs(start: int) -> set[int]:
         component: set[int] = set()
         stack = [start]
         while stack:
             atom_idx = stack.pop()
-            if atom_idx in visited:
+            if visited[atom_idx]:
                 continue
-            visited.add(atom_idx)
+            visited[atom_idx] = True
             component.add(atom_idx)
             
-            atom = mol.atoms[atom_idx]
+            atom = atoms[atom_idx]
             for bond_idx in atom.bond_indices:
-                bond = mol.bonds[bond_idx]
+                bond = bonds[bond_idx]
                 neighbor = bond.other_atom(atom_idx)
-                if neighbor not in visited:
+                if not visited[neighbor]:
                     stack.append(neighbor)
         return component
     
-    for i in range(mol.num_atoms):
-        if i not in visited:
+    for i in range(num_atoms):
+        if not visited[i]:
             component = dfs(i)
             components.append(component)
     
@@ -472,8 +483,3 @@ def brics_decompose(
     if return_mols:
         return valid_fragments
     return {to_smiles(f) for f in valid_fragments}
-
-
-BRICSDecompose = brics_decompose
-FindBRICSBonds = find_brics_bonds
-BreakBRICSBonds = break_brics_bonds
