@@ -1,6 +1,6 @@
 """SMARTS substructure matching."""
 
-from chirpy.match.substructure import (
+from chiralipy.match.substructure import (
     substructure_search,
     has_substructure,
     count_matches,

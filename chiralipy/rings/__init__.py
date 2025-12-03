@@ -1,6 +1,6 @@
 """Ring detection and analysis."""
 
-from chirpy.rings.detection import (
+from chiralipy.rings.detection import (
     find_sssr,
     find_ring_systems,
     get_ring_info,

@@ -8,8 +8,8 @@ The implementation uses a VF2-like backtracking algorithm with
 SMARTS-specific atom and bond matching constraints.
 
 Example:
-    >>> from chirpy import parse
-    >>> from chirpy.match import substructure_search, has_substructure
+    >>> from chiralipy import parse
+    >>> from chiralipy.match import substructure_search, has_substructure
     >>> 
     >>> mol = parse("c1ccccc1CCO")
     >>> pattern = parse("[cR]")
@@ -22,10 +22,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from chirpy.rings import get_ring_info, get_ring_bonds, _find_ring_atoms_and_bonds_fast
+from chiralipy.rings import get_ring_info, get_ring_bonds, _find_ring_atoms_and_bonds_fast
 
 if TYPE_CHECKING:
-    from chirpy.types import Atom, Bond, Molecule
+    from chiralipy.types import Atom, Bond, Molecule
 
 
 @dataclass(slots=True)
@@ -96,7 +96,7 @@ def _matches_recursive_smarts(
     Returns:
         True if the atom matches the recursive pattern.
     """
-    from chirpy.parser import parse
+    from chiralipy.parser import parse
     
     # Get or parse the recursive pattern (cached)
     if recursive_smarts not in _RECURSIVE_PATTERN_CACHE:

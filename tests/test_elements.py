@@ -1,7 +1,7 @@
 """Tests for element and periodic table functionality."""
 
 import pytest
-from chirpy.elements import (
+from chiralipy.elements import (
     Element,
     ORGANIC_SUBSET,
     AROMATIC_SUBSET,

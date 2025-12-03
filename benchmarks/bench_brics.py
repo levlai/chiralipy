@@ -72,7 +72,7 @@ def get_mol_stats_rdkit(smiles: str) -> tuple[int, int]:
 
 def get_mol_stats_chirpy(smiles: str) -> tuple[int, int]:
     """Get atom and bond count using chirpy."""
-    from chirpy import parse
+    from chiralipy import parse
     mol = parse(smiles)
     return mol.num_atoms, len(mol.bonds)
 
@@ -109,8 +109,8 @@ def benchmark_rdkit(smiles: str, iterations: int) -> BenchmarkResult:
 
 def benchmark_chirpy(smiles: str, iterations: int) -> BenchmarkResult:
     """Benchmark chirpy BRICS decomposition."""
-    from chirpy import parse
-    from chirpy.decompose import brics_decompose
+    from chiralipy import parse
+    from chiralipy.decompose import brics_decompose
     
     mol = parse(smiles)
     num_atoms = mol.num_atoms
@@ -179,9 +179,9 @@ def run_single_benchmark():
     if rdkit_result and chirpy_result:
         ratio = chirpy_result.time_seconds / rdkit_result.time_seconds
         if ratio < 1:
-            print(f"chirpy is {1/ratio:.2f}x FASTER than RDKit")
+            print(f"chiralipy is {1/ratio:.2f}x FASTER than RDKit")
         else:
-            print(f"chirpy is {ratio:.2f}x SLOWER than RDKit")
+            print(f"chiralipy is {ratio:.2f}x SLOWER than RDKit")
     else:
         print("Could not compare (one or both libraries failed)")
 
@@ -201,7 +201,7 @@ def run_extended_benchmark():
         print(f"\n[{name}] ({len(smiles)} chars)")
         print(f"  SMILES: {smiles[:50]}{'...' if len(smiles) > 50 else ''}")
         
-        results[name] = {"rdkit": None, "chirpy": None}
+        results[name] = {"rdkit": None, "chiralipy": None}
         
         # RDKit
         try:
@@ -216,7 +216,7 @@ def run_extended_benchmark():
         # chirpy
         try:
             result = benchmark_chirpy(smiles, EXTENDED_ITERATIONS)
-            results[name]["chirpy"] = result
+            results[name]["chiralipy"] = result
             print(f"  chirpy: {result.time_per_call_ms:.4f} ms/call | {result.num_fragments} frags")
         except ImportError:
             print("  chirpy: SKIPPED (not installed)")
@@ -234,7 +234,7 @@ def run_extended_benchmark():
     
     for name in TEST_MOLECULES:
         rdkit_res = results[name]["rdkit"]
-        chirpy_res = results[name]["chirpy"]
+        chirpy_res = results[name]["chiralipy"]
         
         if rdkit_res and chirpy_res:
             ratio = chirpy_res.time_seconds / rdkit_res.time_seconds
@@ -277,7 +277,7 @@ def run_extended_benchmark():
     ratios = []
     for name in TEST_MOLECULES:
         rdkit_res = results[name]["rdkit"]
-        chirpy_res = results[name]["chirpy"]
+        chirpy_res = results[name]["chiralipy"]
         if rdkit_res and chirpy_res:
             ratios.append(chirpy_res.time_seconds / rdkit_res.time_seconds)
     
@@ -299,10 +299,10 @@ def run_extended_benchmark():
     
     # Per-atom cost analysis for chirpy
     print("\n" + "-" * 90)
-    print("chirpy Per-Atom/Per-Bond Cost Analysis")
+    print("chiralipy Per-Atom/Per-Bond Cost Analysis")
     print("-" * 90)
     
-    chirpy_results = [r["chirpy"] for r in results.values() if r["chirpy"]]
+    chirpy_results = [r["chiralipy"] for r in results.values() if r["chiralipy"]]
     if chirpy_results:
         avg_per_atom = sum(r.time_per_atom_us for r in chirpy_results) / len(chirpy_results)
         avg_per_bond = sum(r.time_per_bond_us for r in chirpy_results) / len(chirpy_results)

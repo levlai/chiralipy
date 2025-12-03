@@ -10,10 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Final
 
-from chirpy.elements import BondOrder
+from chiralipy.elements import BondOrder
 
 if TYPE_CHECKING:
-    from chirpy.types import Molecule
+    from chiralipy.types import Molecule
 
 
 # =============================================================================
@@ -546,7 +546,7 @@ class Canonicalizer:
     partition refinement with the HanoiSort algorithm.
     
     Example:
-        >>> from chirpy import parse
+        >>> from chiralipy import parse
         >>> mol = parse("C(C)CC")
         >>> canonicalizer = Canonicalizer(mol)
         >>> ranks = canonicalizer.compute_ranks()

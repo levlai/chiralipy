@@ -16,11 +16,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from chirpy.elements import get_pi_contribution, get_atomic_number
-from chirpy.rings import find_sssr, find_ring_systems
+from chiralipy.elements import get_pi_contribution, get_atomic_number
+from chiralipy.rings import find_sssr, find_ring_systems
 
 if TYPE_CHECKING:
-    from chirpy.types import Molecule
+    from chiralipy.types import Molecule
 
 
 @runtime_checkable
@@ -199,7 +199,7 @@ class AromaticityPerceiver:
             # Use element-based pi contribution calculation
             # For Group 14 (C), being in an aromatic ring counts as having pi bond
             # For Group 16 (O, S), only explicit double bonds count
-            from chirpy.elements import get_outer_electrons
+            from chiralipy.elements import get_outer_electrons
             outer_e = get_outer_electrons(atomic_num)
             
             # Elements with 6 valence electrons (Group 16: O, S, Se) typically contribute

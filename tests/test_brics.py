@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from chirpy import parse, to_smiles
-from chirpy.decompose import find_brics_bonds, break_brics_bonds, brics_decompose
+from chiralipy import parse, to_smiles
+from chiralipy.decompose import find_brics_bonds, break_brics_bonds, brics_decompose
 
 
 # Skip if RDKit not available
@@ -295,7 +295,7 @@ class TestBRICSEdgeCases:
     
     def test_empty_molecule(self) -> None:
         """Test with empty molecule."""
-        from chirpy.types import Molecule
+        from chiralipy.types import Molecule
         mol = Molecule()
         
         bonds = list(find_brics_bonds(mol))

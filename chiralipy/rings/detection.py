@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from chirpy.types import Molecule
+    from chiralipy.types import Molecule
 
 
 def _find_ring_atoms_and_bonds_fast(mol: "Molecule") -> tuple[set[int], set[tuple[int, int]]]:

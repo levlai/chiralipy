@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from chirpy import parse, to_smiles
-from chirpy.decompose import (
+from chiralipy import parse, to_smiles
+from chiralipy.decompose import (
     get_scaffold,
     get_framework,
     get_side_chains,
@@ -362,7 +362,7 @@ class TestEdgeCases:
     
     def test_empty_molecule(self) -> None:
         """Test with empty molecule."""
-        from chirpy.types import Molecule
+        from chiralipy.types import Molecule
         mol = Molecule()
         
         scaffold = get_scaffold(mol)

@@ -7,10 +7,10 @@ it produces output matching RDKit's canonical SMILES.
 import pytest
 from rdkit import Chem
 
-from chirpy import parse, canonical_smiles, to_smiles
-from chirpy.transform import perceive_aromaticity
-from chirpy.canon import canonical_ranks
-from chirpy.writer import SmilesWriter
+from chiralipy import parse, canonical_smiles, to_smiles
+from chiralipy.transform import perceive_aromaticity
+from chiralipy.canon import canonical_ranks
+from chiralipy.writer import SmilesWriter
 from .conftest import rdkit_canonical, rdkit_canonical_isomeric
 
 
@@ -402,11 +402,11 @@ class TestIdempotenceMatchesRDKit:
         rdkit2 = rdkit_canonical(rdkit1)
         
         # Both should be idempotent
-        assert canon1 == canon2, f"chirpy not idempotent for {smiles}"
+        assert canon1 == canon2, f"chiralipy not idempotent for {smiles}"
         assert rdkit1 == rdkit2, f"RDKit not idempotent for {smiles}"
         
         # And should match each other
-        assert canon1 == rdkit1, f"chirpy doesn't match RDKit for {smiles}"
+        assert canon1 == rdkit1, f"chiralipy doesn't match RDKit for {smiles}"
 
 
 class TestComplexMoleculesMatchRDKit:
@@ -496,7 +496,7 @@ class TestRDKitTestCases:
         
         # Verify chirpy matches
         result = canonical_smiles(input_smiles)
-        assert result == expected_canonical, f"chirpy: Expected {expected_canonical}, Got {result}"
+        assert result == expected_canonical, f"chiralipy: Expected {expected_canonical}, Got {result}"
 
 
 class TestSmilesWriterAPI:

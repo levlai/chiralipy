@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-from chirpy.parser import parse
-from chirpy.match import substructure_search, has_substructure, count_matches
-from chirpy.transform import perceive_aromaticity
+from chiralipy.parser import parse
+from chiralipy.match import substructure_search, has_substructure, count_matches
+from chiralipy.transform import perceive_aromaticity
 
 # Try to import RDKit for comparison tests
 try:
@@ -306,14 +306,14 @@ class TestMatchesRDKit:
         # Compare counts
         assert len(chirpy_matches) == len(rdkit_matches), \
             f"Count mismatch for {pattern_smarts} in {mol_smiles}: " \
-            f"chirpy={len(chirpy_matches)}, rdkit={len(rdkit_matches)}"
+            f"chiralipy={len(chirpy_matches)}, rdkit={len(rdkit_matches)}"
         
         # Compare actual matches (as sets since order may differ)
         rdkit_set = set(rdkit_matches)
         chirpy_set = set(chirpy_matches)
         assert chirpy_set == rdkit_set, \
             f"Match mismatch for {pattern_smarts} in {mol_smiles}: " \
-            f"chirpy={chirpy_set}, rdkit={rdkit_set}"
+            f"chiralipy={chirpy_set}, rdkit={rdkit_set}"
     
     def test_single_carbon(self) -> None:
         """Single carbon match."""

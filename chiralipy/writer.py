@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-from chirpy.transform.aromaticity import perceive_aromaticity
-from chirpy.canon import canonical_ranks
-from chirpy.elements import AROMATIC_SUBSET, ORGANIC_SUBSET
-from chirpy.rings import _find_ring_atoms_and_bonds_fast
+from chiralipy.transform.aromaticity import perceive_aromaticity
+from chiralipy.canon import canonical_ranks
+from chiralipy.elements import AROMATIC_SUBSET, ORGANIC_SUBSET
+from chiralipy.rings import _find_ring_atoms_and_bonds_fast
 
 if TYPE_CHECKING:
-    from chirpy.types import Atom, Bond, Molecule
+    from chiralipy.types import Atom, Bond, Molecule
 
 
 # Constants for canonical traversal
@@ -71,7 +71,7 @@ class SmilesWriter:
     3. Ring digits assigned in order of first encounter
     
     Example:
-        >>> from chirpy import parse
+        >>> from chiralipy import parse
         >>> mol = parse("C(C)CC")
         >>> writer = SmilesWriter(mol)
         >>> writer.to_smiles()
@@ -489,7 +489,7 @@ class SmilesWriter:
         
         # Check if explicit hydrogens differ from expected implicit
         if atom.explicit_hydrogens > 0:
-            from chirpy.elements import get_default_valence, get_atomic_number
+            from chiralipy.elements import get_default_valence, get_atomic_number
             
             # Get atomic number and default valence
             atomic_num = get_atomic_number(symbol)
@@ -603,7 +603,7 @@ def canonical_smiles(smiles_or_mol: str | "Molecule") -> str:
         >>> canonical_smiles("c1ccccc1")
         'c1ccccc1'
     """
-    from chirpy.parser import parse
+    from chiralipy.parser import parse
     
     if isinstance(smiles_or_mol, str):
         mol = parse(smiles_or_mol)

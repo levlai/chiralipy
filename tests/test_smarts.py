@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import pytest
 
-from chirpy.parser import parse
-from chirpy.writer import to_smiles
-from chirpy.elements import BondOrder
+from chiralipy.parser import parse
+from chiralipy.writer import to_smiles
+from chiralipy.elements import BondOrder
 
 
 class TestWildcardAtom:

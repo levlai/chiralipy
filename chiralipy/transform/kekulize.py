@@ -15,14 +15,14 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
-from chirpy.elements import (
+from chiralipy.elements import (
     AROMATIC_CAPABLE_ELEMENTS,
     get_atomic_number,
     get_outer_electrons,
 )
 
 if TYPE_CHECKING:
-    from chirpy.types import Molecule
+    from chiralipy.types import Molecule
 
 
 class KekulizationError(Exception):
@@ -320,7 +320,7 @@ def kekulize_smiles(mol: Molecule) -> str:
         >>> kekulize_smiles(mol)
         'C1=CC=CC=C1'
     """
-    from chirpy.writer import to_smiles
+    from chiralipy.writer import to_smiles
     
     kek_mol = kekulize(mol)  # Returns a copy by default
     return to_smiles(kek_mol)

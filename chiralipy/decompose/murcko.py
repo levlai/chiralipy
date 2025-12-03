@@ -24,10 +24,10 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Iterator
 
-from chirpy.parser import parse
-from chirpy.rings import find_sssr, find_ring_systems, get_ring_bonds, _find_ring_atoms_and_bonds_fast
-from chirpy.writer import to_smiles
-from chirpy.types import Atom, Bond, Molecule
+from chiralipy.parser import parse
+from chiralipy.rings import find_sssr, find_ring_systems, get_ring_bonds, _find_ring_atoms_and_bonds_fast
+from chiralipy.writer import to_smiles
+from chiralipy.types import Atom, Bond, Molecule
 
 
 @dataclass

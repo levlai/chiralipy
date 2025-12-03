@@ -21,9 +21,9 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Iterator
 
-from chirpy.parser import parse
-from chirpy.writer import to_smiles
-from chirpy.types import Atom, Bond, Molecule
+from chiralipy.parser import parse
+from chiralipy.writer import to_smiles
+from chiralipy.types import Atom, Bond, Molecule
 
 
 ENVIRONS: dict[str, str] = {
@@ -157,7 +157,7 @@ def find_brics_bonds(mol: Molecule) -> Iterator[tuple[tuple[int, int], tuple[str
         >>> bonds = list(find_brics_bonds(mol))
         >>> # Returns bonds that can be cleaved according to BRICS rules
     """
-    from chirpy.match import RingInfo, match_at_root
+    from chiralipy.match import RingInfo, match_at_root
 
     ring_info = RingInfo.from_molecule(mol)
     _ensure_pattern_groups()

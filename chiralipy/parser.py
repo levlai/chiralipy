@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Final
 
-from chirpy.elements import (
+from chiralipy.elements import (
     AROMATIC_SUBSET,
     ORGANIC_SUBSET,
     TWO_LETTER_ORGANIC,
@@ -32,8 +32,8 @@ from chirpy.elements import (
     is_aromatic_symbol,
     BondOrder,
 )
-from chirpy.exceptions import ParseError, RingError
-from chirpy.types import Atom, Bond, Molecule
+from chiralipy.exceptions import ParseError, RingError
+from chiralipy.types import Atom, Bond, Molecule
 
 
 class _Tokenizer:
@@ -191,7 +191,7 @@ class SmilesParser:
         3
     
     For convenience, use the module-level `parse()` function:
-        >>> from chirpy import parse
+        >>> from chiralipy import parse
         >>> mol = parse("CCO")
     """
     

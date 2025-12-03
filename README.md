@@ -1,6 +1,6 @@
-# <img src="resources/icon.png" width="128" height="128" alt="Chirpy">
+# chiralipy
 
-Chirpy is a pure Python library for SMILES/SMARTS parsing, canonicalization, and molecular manipulation.
+Chiralipy is a pure Python library for SMILES/SMARTS parsing, canonicalization, and molecular manipulation.
 
 ## Installation
 
@@ -11,20 +11,20 @@ pip install -e .
 ## Quick Start
 
 ```python
-from chirpy import parse, canonical_smiles
+from chiralipy import parse, canonical_smiles
 
 # Parse and canonicalize
 mol = parse("C(C)CC")
 print(canonical_smiles(mol))  # CCCC
 
 # Substructure matching
-from chirpy.match import substructure_search
+from chiralipy.match import substructure_search
 mol = parse("c1ccccc1CCO")
 pattern = parse("[OH]")
 matches = substructure_search(mol, pattern)  # [(7,)]
 
 # BRICS decomposition
-from chirpy.decompose import brics_decompose
+from chiralipy.decompose import brics_decompose
 mol = parse("CCOc1ccc(CC)cc1")
 fragments = brics_decompose(mol)
 print(sorted(fragments))
@@ -44,12 +44,12 @@ print(sorted(fragments))
 ## Core API
 
 ```python
-from chirpy import parse, canonical_smiles, to_smiles
+from chiralipy import parse, canonical_smiles, to_smiles
 
-from chirpy.match import substructure_search, has_substructure
-from chirpy.decompose import brics_decompose, get_scaffold
-from chirpy.rings import find_sssr
-from chirpy.transform import kekulize
+from chiralipy.match import substructure_search, has_substructure
+from chiralipy.decompose import brics_decompose, get_scaffold
+from chiralipy.rings import find_sssr
+from chiralipy.transform import kekulize
 ```
 
 ## Benchmark: BRICS Decomposition
@@ -57,7 +57,7 @@ from chirpy.transform import kekulize
 Comparison against RDKit (C++ implementation):
 
 ```
-Molecule            Atoms  Bonds   RDKit ms  chirpy ms    Ratio
+Molecule            Atoms  Bonds   RDKit ms  chiralipy ms    Ratio
 ----------------------------------------------------------------
 small_ether             5      4     0.37       0.60      1.62x
 medium_drug            15     15     0.88       1.89      2.13x

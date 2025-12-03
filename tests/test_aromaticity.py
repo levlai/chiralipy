@@ -4,8 +4,8 @@ This module tests the chirpy aromaticity perception algorithm.
 """
 
 import pytest
-from chirpy import parse
-from chirpy.transform import perceive_aromaticity, AromaticityPerceiver
+from chiralipy import parse
+from chiralipy.transform import perceive_aromaticity, AromaticityPerceiver
 
 
 class TestAromaticPerception:

@@ -8,8 +8,8 @@ for validation.
 import pytest
 from rdkit import Chem
 
-from chirpy import parse, Molecule, Atom, Bond
-from chirpy.exceptions import ParseError, RingError
+from chiralipy import parse, Molecule, Atom, Bond
+from chiralipy.exceptions import ParseError, RingError
 
 
 def rdkit_atom_count(smiles: str) -> int:
@@ -685,7 +685,7 @@ class TestParserMatchesRDKit:
         # Get charge from RDKit
         rdkit_charge = rdkit_mol.GetAtomWithIdx(0).GetFormalCharge()
         
-        # Get charge from chirpy
+        # Get charge from chiralipy
         chirpy_charge = mol.atoms[0].charge
         
         assert chirpy_charge == rdkit_charge == expected_charge
@@ -705,7 +705,7 @@ class TestParserMatchesRDKit:
         # Get isotope from RDKit
         rdkit_isotope = rdkit_mol.GetAtomWithIdx(0).GetIsotope()
         
-        # Get isotope from chirpy
+        # Get isotope from chiralipy
         chirpy_isotope = mol.atoms[0].isotope
         
         assert chirpy_isotope == rdkit_isotope == expected_isotope

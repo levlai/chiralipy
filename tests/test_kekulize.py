@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from chirpy import parse, to_smiles
-from chirpy.transform import kekulize
+from chiralipy import parse, to_smiles
+from chiralipy.transform import kekulize
 
 
 # Skip if RDKit not available
@@ -178,7 +178,7 @@ class TestKekulizeEdgeCases:
     
     def test_kekulize_empty_molecule(self) -> None:
         """Test kekulization of empty molecule."""
-        from chirpy.types import Molecule
+        from chiralipy.types import Molecule
         mol = Molecule()
         kek_mol = kekulize(mol)
         assert kek_mol.num_atoms == 0

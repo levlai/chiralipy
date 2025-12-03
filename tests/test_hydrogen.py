@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from chirpy import parse, to_smiles
-from chirpy.transform import add_explicit_hydrogens, remove_explicit_hydrogens
+from chiralipy import parse, to_smiles
+from chiralipy.transform import add_explicit_hydrogens, remove_explicit_hydrogens
 
 
 # Skip if RDKit not available
@@ -228,7 +228,7 @@ class TestHydrogenEdgeCases:
     
     def test_empty_molecule(self) -> None:
         """Test with empty molecule."""
-        from chirpy.types import Molecule
+        from chiralipy.types import Molecule
         mol = Molecule()
         
         mol_h = add_explicit_hydrogens(mol)

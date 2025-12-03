@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "chirpy"
+name = "chiralipy"
 version = "0.1.0"
 description = "Pure Python chemistry library with zero dependencies"
 readme = "README.md"
@@ -50,16 +50,16 @@ test = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/vlekic/chirpy"
-Documentation = "https://github.com/vlekic/chirpy#readme"
-Repository = "https://github.com/vlekic/chirpy"
+Homepage = "https://github.com/vlekic/chiralipy"
+Documentation = "https://github.com/vlekic/chiralipy#readme"
+Repository = "https://github.com/vlekic/chiralipy"
 
 [tool.hatch.build.targets.wheel]
-packages = ["chirpy"]
+packages = ["chiralipy"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "/chirpy",
+    "/chiralipy",
     "/tests",
     "/README.md",
     "/LICENSE",
