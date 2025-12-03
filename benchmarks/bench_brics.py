@@ -110,7 +110,7 @@ def benchmark_rdkit(smiles: str, iterations: int) -> BenchmarkResult:
 def benchmark_chirpy(smiles: str, iterations: int) -> BenchmarkResult:
     """Benchmark chirpy BRICS decomposition."""
     from chirpy import parse
-    from chirpy.brics import brics_decompose
+    from chirpy.decompose import brics_decompose
     
     mol = parse(smiles)
     num_atoms = mol.num_atoms

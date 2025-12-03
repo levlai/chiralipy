@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from chirpy import parse, to_smiles, kekulize
+from chirpy import parse, to_smiles
+from chirpy.transform import kekulize
 
 
 # Skip if RDKit not available

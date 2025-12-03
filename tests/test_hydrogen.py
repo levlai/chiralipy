@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from chirpy import parse, to_smiles, add_explicit_hydrogens, remove_explicit_hydrogens
+from chirpy import parse, to_smiles
+from chirpy.transform import add_explicit_hydrogens, remove_explicit_hydrogens
 
 
 # Skip if RDKit not available

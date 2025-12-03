@@ -22,10 +22,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .rings import get_ring_info, get_ring_bonds, _find_ring_atoms_and_bonds_fast
+from chirpy.rings import get_ring_info, get_ring_bonds, _find_ring_atoms_and_bonds_fast
 
 if TYPE_CHECKING:
-    from .types import Atom, Bond, Molecule
+    from chirpy.types import Atom, Bond, Molecule
 
 
 @dataclass(slots=True)
@@ -96,7 +96,7 @@ def _matches_recursive_smarts(
     Returns:
         True if the atom matches the recursive pattern.
     """
-    from .parser import parse
+    from chirpy.parser import parse
     
     # Get or parse the recursive pattern (cached)
     if recursive_smarts not in _RECURSIVE_PATTERN_CACHE:

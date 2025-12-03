@@ -21,9 +21,9 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Iterator
 
-from .parser import parse
-from .writer import to_smiles
-from .types import Atom, Bond, Molecule
+from chirpy.parser import parse
+from chirpy.writer import to_smiles
+from chirpy.types import Atom, Bond, Molecule
 
 
 ENVIRONS: dict[str, str] = {
@@ -157,7 +157,7 @@ def find_brics_bonds(mol: Molecule) -> Iterator[tuple[tuple[int, int], tuple[str
         >>> bonds = list(find_brics_bonds(mol))
         >>> # Returns bonds that can be cleaved according to BRICS rules
     """
-    from .match import RingInfo, match_at_root
+    from chirpy.match import RingInfo, match_at_root
 
     ring_info = RingInfo.from_molecule(mol)
     _ensure_pattern_groups()
@@ -279,6 +279,7 @@ def break_brics_bonds(
                 explicit_hydrogens=0,
                 is_aromatic=False,
                 isotope=int(label1) if label1.isdigit() else None,
+                atom_class=bond.atom1_idx,  # Store original atom index
             )
             new_atoms.append(dummy1)
             dummy_bonds.append((bond.atom1_idx, next_atom_idx, label1, bond.order))
@@ -291,6 +292,7 @@ def break_brics_bonds(
                 explicit_hydrogens=0,
                 is_aromatic=False,
                 isotope=int(label2) if label2.isdigit() else None,
+                atom_class=bond.atom2_idx,  # Store original atom index
             )
             new_atoms.append(dummy2)
             dummy_bonds.append((bond.atom2_idx, next_atom_idx, label2, bond.order))
@@ -426,13 +428,102 @@ def _get_fragments(mol: Molecule) -> list[Molecule]:
     return fragments
 
 
+def _get_stems(mol: Molecule) -> set[int]:
+    """Extract original atom indices at cleavage points from a molecule.
+    
+    The atom indices are stored in the atom_class field of dummy atoms
+    during bond breaking.
+    
+    Args:
+        mol: Molecule to extract stems from.
+    
+    Returns:
+        Set of original atom indices where cleavages occurred.
+    """
+    stems: set[int] = set()
+    for atom in mol.atoms:
+        if atom.symbol == '*' and atom.atom_class is not None:
+            stems.add(atom.atom_class)
+    return stems
+
+
+def _strip_dummy_atoms(mol: Molecule) -> Molecule:
+    """Remove dummy atoms (*) from a molecule, keeping only real atoms.
+    
+    The bonds to dummy atoms are removed, leaving the attachment point atoms
+    with their original connectivity (minus the dummy).
+    
+    Args:
+        mol: Molecule to strip dummy atoms from.
+    
+    Returns:
+        New molecule without dummy atoms.
+    """
+    # Find indices of real (non-dummy) atoms
+    real_atom_indices: list[int] = []
+    for atom in mol.atoms:
+        if atom.symbol != '*':
+            real_atom_indices.append(atom.idx)
+    
+    if len(real_atom_indices) == mol.num_atoms:
+        # No dummy atoms, return a copy
+        return deepcopy(mol)
+    
+    # Create mapping from old indices to new indices
+    old_to_new: dict[int, int] = {}
+    for new_idx, old_idx in enumerate(real_atom_indices):
+        old_to_new[old_idx] = new_idx
+    
+    real_atoms_set = set(real_atom_indices)
+    
+    # Build new molecule
+    new_mol = Molecule()
+    
+    for old_idx in real_atom_indices:
+        old_atom = mol.atoms[old_idx]
+        new_atom = Atom(
+            idx=old_to_new[old_idx],
+            symbol=old_atom.symbol,
+            charge=old_atom.charge,
+            explicit_hydrogens=old_atom.explicit_hydrogens,
+            is_aromatic=old_atom.is_aromatic,
+            isotope=old_atom.isotope,
+            chirality=old_atom.chirality,
+            atom_class=old_atom.atom_class,
+        )
+        new_atom.bond_indices = []
+        new_mol.atoms.append(new_atom)
+    
+    # Add bonds between real atoms only
+    added_bonds: set[tuple[int, int]] = set()
+    for bond in mol.bonds:
+        if bond.atom1_idx in real_atoms_set and bond.atom2_idx in real_atoms_set:
+            bond_key = (min(bond.atom1_idx, bond.atom2_idx), max(bond.atom1_idx, bond.atom2_idx))
+            if bond_key not in added_bonds:
+                new_bond = Bond(
+                    idx=len(new_mol.bonds),
+                    atom1_idx=old_to_new[bond.atom1_idx],
+                    atom2_idx=old_to_new[bond.atom2_idx],
+                    order=bond.order,
+                    is_aromatic=bond.is_aromatic,
+                    stereo=bond.stereo,
+                )
+                new_mol.bonds.append(new_bond)
+                new_mol.atoms[new_bond.atom1_idx].bond_indices.append(new_bond.idx)
+                new_mol.atoms[new_bond.atom2_idx].bond_indices.append(new_bond.idx)
+                added_bonds.add(bond_key)
+    
+    return new_mol
+
+
 def brics_decompose(
     mol: Molecule,
     min_fragment_size: int = 1,
     keep_non_leaf_nodes: bool = False,
     single_pass: bool = False,
     return_mols: bool = False,
-) -> set[str] | list[Molecule]:
+    return_stems: bool = False,
+) -> set[str] | list[Molecule] | dict[str, set[int]] | list[tuple[Molecule, set[int]]]:
     """Perform BRICS decomposition on a molecule.
     
     Identifies and breaks all BRICS bonds in the molecule.
@@ -441,17 +532,27 @@ def brics_decompose(
         mol: Molecule to decompose.
         min_fragment_size: Minimum number of heavy atoms in a fragment.
         keep_non_leaf_nodes: If True, include the original molecule in output.
-        single_pass: Deprecated, has no effect (algorithm is always single-pass).
+        single_pass: If True, only break bonds once. If False (default),
+            recursively decompose fragments until no more BRICS bonds remain.
         return_mols: If True, return Molecule objects instead of SMILES.
+        return_stems: If True, return original atom indices at cleavage points.
+            Dummy atoms are removed from the fragments, leaving only real atoms.
+            When combined with return_mols=False, returns dict mapping SMILES to atom index sets.
+            When combined with return_mols=True, returns list of (Molecule, atom_indices) tuples.
     
     Returns:
-        Set of SMILES strings (or list of Molecules if return_mols=True).
+        - set[str]: SMILES strings (default)
+        - list[Molecule]: If return_mols=True
+        - dict[str, set[int]]: If return_stems=True (SMILES -> original atom indices)
+        - list[tuple[Molecule, set[int]]]: If return_mols=True and return_stems=True
     
     Example:
         >>> mol = parse("CCOc1ccc(CC)cc1")
         >>> frags = brics_decompose(mol)
         >>> sorted(frags)
         ['[16*]c1ccc([16*])cc1', '[3*]O[3*]', '[4*]CC', '[8*]CC']
+        >>> frags_with_stems = brics_decompose(mol, return_stems=True)
+        >>> # Returns atom indices where cleavages occurred
     """
     mol_smi = to_smiles(mol)
     
@@ -459,8 +560,12 @@ def brics_decompose(
     bonds = list(find_brics_bonds(mol))
     
     if not bonds:
+        if return_mols and return_stems:
+            return [(mol, set())]
         if return_mols:
             return [mol]
+        if return_stems:
+            return {mol_smi: set()}
         return {mol_smi}
     
     # Break all bonds simultaneously
@@ -473,13 +578,52 @@ def brics_decompose(
         heavy_count = sum(1 for a in frag.atoms if a.symbol != '*')
         if heavy_count >= min_fragment_size:
             valid_fragments.append(frag)
-            
-    if keep_non_leaf_nodes:
-        if return_mols:
-            # Note: returning deepcopy of mol to be safe, though not strictly necessary if caller doesn't mutate
-            return [mol] + valid_fragments
-        return {mol_smi} | {to_smiles(f) for f in valid_fragments}
     
+    if single_pass:
+        # Single pass: return fragments from one round of decomposition
+        if keep_non_leaf_nodes:
+            all_frags = [mol] + valid_fragments
+        else:
+            all_frags = valid_fragments
+        
+        if return_mols and return_stems:
+            return [(_strip_dummy_atoms(f), _get_stems(f)) for f in all_frags]
+        if return_mols:
+            return all_frags
+        if return_stems:
+            return {to_smiles(_strip_dummy_atoms(f)): _get_stems(f) for f in all_frags}
+        return {to_smiles(f) for f in all_frags}
+    
+    # Recursive decomposition: continue until no more bonds can be broken
+    final_fragments: list[Molecule] = []
+    intermediate_fragments: list[Molecule] = [mol] if keep_non_leaf_nodes else []
+    
+    to_process = valid_fragments
+    while to_process:
+        next_round: list[Molecule] = []
+        for frag in to_process:
+            frag_bonds = list(find_brics_bonds(frag))
+            if not frag_bonds:
+                # No more bonds to break, this is a leaf fragment
+                final_fragments.append(frag)
+            else:
+                # More bonds to break
+                if keep_non_leaf_nodes:
+                    intermediate_fragments.append(frag)
+                sub_fragmented = break_brics_bonds(frag, frag_bonds)
+                sub_fragments = _get_fragments(sub_fragmented)
+                for sub_frag in sub_fragments:
+                    heavy_count = sum(1 for a in sub_frag.atoms if a.symbol != '*')
+                    if heavy_count >= min_fragment_size:
+                        next_round.append(sub_frag)
+        to_process = next_round
+    
+    all_fragments = intermediate_fragments + final_fragments
+    
+    if return_mols and return_stems:
+        return [(_strip_dummy_atoms(f), _get_stems(f)) for f in all_fragments]
     if return_mols:
-        return valid_fragments
-    return {to_smiles(f) for f in valid_fragments}
+        return all_fragments
+    if return_stems:
+        return {to_smiles(_strip_dummy_atoms(f)): _get_stems(f) for f in all_fragments}
+    return {to_smiles(f) for f in all_fragments}

@@ -8,7 +8,7 @@ import pytest
 from rdkit import Chem
 
 from chirpy import parse, canonical_smiles, to_smiles
-from chirpy.aromaticity import perceive_aromaticity
+from chirpy.transform import perceive_aromaticity
 from chirpy.canon import canonical_ranks
 from chirpy.writer import SmilesWriter
 from .conftest import rdkit_canonical, rdkit_canonical_isomeric

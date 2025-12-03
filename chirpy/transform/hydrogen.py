@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from .types import Atom, Bond, Molecule
+from chirpy.types import Atom, Bond, Molecule
 
 
 def add_explicit_hydrogens(mol: Molecule) -> Molecule:

@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Iterator
 
-from .elements import (
+from chirpy.elements import (
     BondOrder,
     get_atomic_number,
     get_default_valence,

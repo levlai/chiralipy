@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Final
 
-from .elements import (
+from chirpy.elements import (
     AROMATIC_SUBSET,
     ORGANIC_SUBSET,
     TWO_LETTER_ORGANIC,
@@ -32,8 +32,8 @@ from .elements import (
     is_aromatic_symbol,
     BondOrder,
 )
-from .exceptions import ParseError, RingError
-from .types import Atom, Bond, Molecule
+from chirpy.exceptions import ParseError, RingError
+from chirpy.types import Atom, Bond, Molecule
 
 
 class _Tokenizer:

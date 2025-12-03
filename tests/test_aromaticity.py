@@ -5,7 +5,7 @@ This module tests the chirpy aromaticity perception algorithm.
 
 import pytest
 from chirpy import parse
-from chirpy.aromaticity import perceive_aromaticity, AromaticityPerceiver
+from chirpy.transform import perceive_aromaticity, AromaticityPerceiver
 
 
 class TestAromaticPerception:

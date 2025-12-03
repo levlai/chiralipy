@@ -10,10 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Final
 
-from .elements import BondOrder
+from chirpy.elements import BondOrder
 
 if TYPE_CHECKING:
-    from .types import Molecule
+    from chirpy.types import Molecule
 
 
 # =============================================================================

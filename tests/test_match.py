@@ -11,7 +11,7 @@ import pytest
 
 from chirpy.parser import parse
 from chirpy.match import substructure_search, has_substructure, count_matches
-from chirpy.aromaticity import perceive_aromaticity
+from chirpy.transform import perceive_aromaticity
 
 # Try to import RDKit for comparison tests
 try:

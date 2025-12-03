@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from chirpy import parse, to_smiles, find_brics_bonds, break_brics_bonds, brics_decompose
+from chirpy import parse, to_smiles
+from chirpy.decompose import find_brics_bonds, break_brics_bonds, brics_decompose
 
 
 # Skip if RDKit not available
@@ -247,17 +248,18 @@ class TestBRICSCompareWithRDKit:
         rdmol = Chem.MolFromSmiles(smiles)
         rdkit_frags = set(BRICS.BRICSDecompose(rdmol))
         
-        # Must have same number of fragments
-        assert len(chirpy_frags) == len(rdkit_frags), \
-            f"Fragment count mismatch: chirpy={len(chirpy_frags)}, rdkit={len(rdkit_frags)}"
-        
         # Canonicalize and compare
+        # Note: chirpy includes atom class labels (e.g., [16*:5]) that distinguish
+        # chemically identical fragments. Strip these for comparison with RDKit.
         def canonicalize(frag_set):
+            import re
             result = set()
             for smi in frag_set:
                 # Parse and re-serialize to canonical form
+                # Strip atom class labels (e.g., [16*:5] -> [16*]) for comparison
+                smi_no_class = re.sub(r':\d+\]', ']', smi)
                 try:
-                    m = Chem.MolFromSmiles(smi)
+                    m = Chem.MolFromSmiles(smi_no_class)
                     if m:
                         result.add(Chem.MolToSmiles(m))
                 except:
@@ -266,6 +268,10 @@ class TestBRICSCompareWithRDKit:
         
         chirpy_canonical = canonicalize(chirpy_frags)
         rdkit_canonical = canonicalize(rdkit_frags)
+        
+        # Must have same number of unique fragments (after stripping atom class labels)
+        assert len(chirpy_canonical) == len(rdkit_canonical), \
+            f"Fragment count mismatch: chirpy={len(chirpy_canonical)}, rdkit={len(rdkit_canonical)}"
         
         assert chirpy_canonical == rdkit_canonical, \
             f"Fragment mismatch:\n  chirpy: {sorted(chirpy_canonical)}\n  rdkit: {sorted(rdkit_canonical)}"
