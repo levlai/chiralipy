@@ -50,9 +50,9 @@ test = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/vlekic/chiralipy"
-Documentation = "https://github.com/vlekic/chiralipy#readme"
-Repository = "https://github.com/vlekic/chiralipy"
+Homepage = "https://github.com/levlai/chiralipy"
+Documentation = "https://github.com/levlai/chiralipy#readme"
+Repository = "https://github.com/levlai/chiralipy"
 
 [tool.hatch.build.targets.wheel]
 packages = ["chiralipy"]
