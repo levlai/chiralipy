@@ -137,6 +137,11 @@ class _ParserState:
     # Ring closure tracking: ring_index -> (atom_idx, pending_bond_order, pending_aromatic)
     open_rings: dict[int, tuple[int, int | None, bool | None]] = field(default_factory=dict)
     
+    # Track open ring digits for each atom (for chirality SMILES-order tracking)
+    # Maps atom_idx -> list of (ring_index, position_in_neighbor_list)
+    # The position is where the ring bond should go in _smiles_neighbor_bonds
+    pending_ring_positions: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
+    
     # Branch stack for parentheses
     branch_stack: list[int] = field(default_factory=list)
     
@@ -410,10 +415,13 @@ class SmilesParser:
                 tok.position,
             )
         
+        atom_idx = self._state.prev_atom
+        atom = self._mol.atoms[atom_idx]
+        
         if ring_idx in self._state.open_rings:
             # Close the ring
             atom1, order1, aromatic1 = self._state.open_rings.pop(ring_idx)
-            atom2 = self._state.prev_atom
+            atom2 = atom_idx
             
             # Determine bond properties
             order = self._state.pending_bond_order or order1 or 1
@@ -427,19 +435,52 @@ class SmilesParser:
                     self._mol.atoms[atom2].is_aromatic
                 )
             
-            self._mol.add_bond(
+            bond_idx = self._mol.add_bond(
                 atom1,
                 atom2,
                 order=1 if aromatic else order,
                 is_aromatic=aromatic,
             )
+            
+            # Update SMILES neighbor order for chiral atoms at both ends
+            # atom1 had a placeholder recorded when it opened this ring
+            if atom1 in self._state.pending_ring_positions:
+                for (r_idx, pos) in self._state.pending_ring_positions[atom1]:
+                    if r_idx == ring_idx:
+                        atom1_obj = self._mol.atoms[atom1]
+                        if atom1_obj._smiles_neighbor_bonds is not None:
+                            atom1_obj._smiles_neighbor_bonds[pos] = bond_idx
+                        break
+                # Remove this pending position
+                self._state.pending_ring_positions[atom1] = [
+                    (r, p) for (r, p) in self._state.pending_ring_positions[atom1]
+                    if r != ring_idx
+                ]
+            
+            # For atom2 (closing end), add bond at current position in SMILES order
+            if atom.chirality and atom._smiles_neighbor_bonds is not None:
+                atom._smiles_neighbor_bonds.append(bond_idx)
         else:
             # Open new ring closure
             self._state.open_rings[ring_idx] = (
-                self._state.prev_atom,
+                atom_idx,
                 self._state.pending_bond_order,
                 self._state.pending_bond_aromatic,
             )
+            
+            # For chiral atoms, record the position where this ring bond should go
+            if atom.chirality:
+                if atom._smiles_neighbor_bonds is None:
+                    # Initialize with bonds added so far (from-bond if any)
+                    atom._smiles_neighbor_bonds = list(atom.bond_indices)
+                
+                # Record position and add a placeholder (-1 will be replaced when ring closes)
+                pos = len(atom._smiles_neighbor_bonds)
+                atom._smiles_neighbor_bonds.append(-1)  # placeholder
+                
+                if atom_idx not in self._state.pending_ring_positions:
+                    self._state.pending_ring_positions[atom_idx] = []
+                self._state.pending_ring_positions[atom_idx].append((ring_idx, pos))
         
         # Reset pending bond
         self._state.pending_bond_order = None
@@ -842,6 +883,11 @@ class SmilesParser:
         # Add bond to previous atom
         self._add_bond_to_previous(atom_idx, aromatic)
         
+        # Initialize _smiles_neighbor_bonds for chiral atoms after the "from" bond is added
+        if chirality:
+            atom = self._mol.atoms[atom_idx]
+            atom._smiles_neighbor_bonds = list(atom.bond_indices)
+        
         self._state.prev_atom = atom_idx
     
     def _lookahead_recursive(self) -> bool:
@@ -1013,7 +1059,8 @@ class SmilesParser:
         if self._state.prev_atom is None:
             return
         
-        prev_aromatic = self._mol.atoms[self._state.prev_atom].is_aromatic
+        prev_atom = self._mol.atoms[self._state.prev_atom]
+        prev_aromatic = prev_atom.is_aromatic
         
         # Capture bond query state before resetting
         is_ring_bond = self._state.pending_bond_ring
@@ -1021,7 +1068,7 @@ class SmilesParser:
         
         # Handle any bond (~) for SMARTS
         if self._state.pending_bond_any:
-            self._mol.add_bond(
+            bond_idx = self._mol.add_bond(
                 self._state.prev_atom,
                 atom_idx,
                 order=0,  # ANY bond order
@@ -1030,12 +1077,13 @@ class SmilesParser:
                 is_ring_bond=is_ring_bond,
                 is_not_ring_bond=is_not_ring_bond,
             )
+            self._update_smiles_neighbor_order(prev_atom, bond_idx)
             self._reset_bond_state()
             return
         
         # Handle dative bonds (-> or <-)
         if self._state.pending_bond_dative:
-            self._mol.add_bond(
+            bond_idx = self._mol.add_bond(
                 self._state.prev_atom,
                 atom_idx,
                 order=6,  # DATIVE bond order
@@ -1045,6 +1093,7 @@ class SmilesParser:
                 is_ring_bond=is_ring_bond,
                 is_not_ring_bond=is_not_ring_bond,
             )
+            self._update_smiles_neighbor_order(prev_atom, bond_idx)
             self._reset_bond_state()
             return
         
@@ -1057,7 +1106,7 @@ class SmilesParser:
             aromatic = prev_aromatic and is_aromatic
             order = 1
         
-        self._mol.add_bond(
+        bond_idx = self._mol.add_bond(
             self._state.prev_atom,
             atom_idx,
             order=1 if aromatic else order,
@@ -1067,7 +1116,15 @@ class SmilesParser:
             is_not_ring_bond=is_not_ring_bond,
         )
         
+        # Update SMILES neighbor order for chiral prev_atom
+        self._update_smiles_neighbor_order(prev_atom, bond_idx)
+        
         self._reset_bond_state()
+    
+    def _update_smiles_neighbor_order(self, atom: Atom, bond_idx: int) -> None:
+        """Update _smiles_neighbor_bonds for a chiral atom when a new bond is added."""
+        if atom.chirality and atom._smiles_neighbor_bonds is not None:
+            atom._smiles_neighbor_bonds.append(bond_idx)
     
     def _reset_bond_state(self) -> None:
         """Reset all pending bond state."""

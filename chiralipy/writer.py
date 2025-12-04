@@ -217,7 +217,12 @@ class SmilesWriter:
             
             # Calculate chirality inversion
             if atom.chirality:
-                original_bonds = list(atom.bond_indices)
+                # Use SMILES-order bonds if available, otherwise fall back to bond_indices
+                original_bonds = (
+                    list(atom._smiles_neighbor_bonds) 
+                    if atom._smiles_neighbor_bonds is not None 
+                    else list(atom.bond_indices)
+                )
                 is_first_in_output = (in_bond_idx is None)
                 was_first_in_input = atom._was_first_in_component
                 

@@ -523,3 +523,66 @@ class TestSmilesWriterAPI:
         
         expected = rdkit_canonical(smiles)
         assert result == expected
+
+
+class TestChiralityPreservation:
+    """Test that chirality is preserved correctly through canonicalization."""
+    
+    @pytest.mark.parametrize("smiles", [
+        # Ring closure chirality - the bug we fixed
+        "C[C@@H]1CSCN1",
+        "C[C@H]1CSCN1",
+        "O=C(O)[C@@H]1CSCN1",  # thiazolidine carboxylic acid
+        "O=C(O)[C@H]1CSCN1",
+        # More ring closure cases
+        "C[C@@H]1CCCC1",
+        "C[C@H]1CCCC1",
+        "C[C@@H]1CCCCC1",
+        "C[C@H]1CCCCC1",
+        # Multiple ring closures
+        "C[C@@H]1CC[C@H](C)CC1",
+        # Simple acyclic chirality
+        "C[C@H](O)F",
+        "C[C@@H](O)F",
+        "F[C@H](Cl)Br",
+        "F[C@@H](Cl)Br",
+        # Chirality with branches
+        "[C@H](Br)(Cl)F",
+        "[C@@H](Br)(Cl)F",
+    ])
+    def test_chirality_preserved_cip(self, smiles):
+        """Test that CIP stereochemistry (R/S) is preserved through canonicalization."""
+        from rdkit import Chem
+        
+        # Parse and canonicalize
+        mol = parse(smiles)
+        result = to_smiles(mol)
+        
+        # Get CIP codes from RDKit
+        rdkit_input = Chem.MolFromSmiles(smiles)
+        rdkit_output = Chem.MolFromSmiles(result)
+        
+        assert rdkit_output is not None, f"RDKit couldn't parse output: {result}"
+        
+        Chem.AssignStereochemistry(rdkit_input, cleanIt=True, force=True)
+        Chem.AssignStereochemistry(rdkit_output, cleanIt=True, force=True)
+        
+        # Collect CIP codes
+        input_cip = {}
+        output_cip = {}
+        
+        for atom in rdkit_input.GetAtoms():
+            if atom.HasProp('_CIPCode'):
+                input_cip[atom.GetIdx()] = atom.GetProp('_CIPCode')
+                
+        for atom in rdkit_output.GetAtoms():
+            if atom.HasProp('_CIPCode'):
+                output_cip[atom.GetIdx()] = atom.GetProp('_CIPCode')
+        
+        # Should have same number of chiral centers
+        assert len(input_cip) == len(output_cip), \
+            f"Different number of chiral centers: {len(input_cip)} vs {len(output_cip)}"
+        
+        # CIP codes should match (order may differ due to reordering)
+        assert sorted(input_cip.values()) == sorted(output_cip.values()), \
+            f"CIP mismatch for {smiles}: input={input_cip}, output={output_cip}"

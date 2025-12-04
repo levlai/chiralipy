@@ -127,6 +127,7 @@ class Atom:
     data: dict | None = None  # User-defined metadata dictionary
     bond_indices: list[int] = field(default_factory=list)
     _was_first_in_component: bool = False
+    _smiles_neighbor_bonds: list[int] | None = None  # Bonds in SMILES appearance order (for chirality)
     
     # SMARTS query fields
     is_wildcard: bool = False
