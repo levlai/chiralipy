@@ -8,6 +8,9 @@ Chiralipy is a pure Python library for SMILES/SMARTS parsing, canonicalization, 
 pip install -e .
 ```
 
+or pip install chiralipy
+
+
 ## Quick Start
 
 ```python
