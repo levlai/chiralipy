@@ -95,7 +95,11 @@ class Atom:
         is_aromatic: Whether this atom is aromatic.
         isotope: Mass number (isotope), or None for natural abundance.
         chirality: Stereochemistry marker ('@' or '@@').
-        atom_class: Atom class number from SMILES (for reaction mapping).
+        atom_class: Atom class number from SMILES (for reaction mapping, written as :[n]).
+        data: User-defined metadata dictionary for storing arbitrary atom properties.
+            This field is preserved through most operations and can be used to track
+            custom information like original indices, stems, labels, etc.
+            Example: atom.data['is_stem'] = True, atom.data['original_idx'] = 5
         bond_indices: Indices of bonds connected to this atom.
         _was_first_in_component: Internal flag for chirality handling.
         
@@ -120,6 +124,7 @@ class Atom:
     isotope: int | None = None
     chirality: str | None = None
     atom_class: int | None = None
+    data: dict | None = None  # User-defined metadata dictionary
     bond_indices: list[int] = field(default_factory=list)
     _was_first_in_component: bool = False
     
@@ -135,7 +140,33 @@ class Atom:
     connectivity_query: int | None = None
     is_recursive: bool = False
     recursive_smarts: str | None = None
+    negated_recursive_smarts: list[str] | None = None  # For !$(...) patterns
     charge_query: int | None = None  # For [+0] exact charge query
+    
+    def get_data(self, key: str, default=None):
+        """Get a value from the data dictionary.
+        
+        Args:
+            key: The key to look up.
+            default: Value to return if key is not found.
+        
+        Returns:
+            The value associated with key, or default if not found.
+        """
+        if self.data is None:
+            return default
+        return self.data.get(key, default)
+    
+    def set_data(self, key: str, value) -> None:
+        """Set a value in the data dictionary.
+        
+        Args:
+            key: The key to set.
+            value: The value to store.
+        """
+        if self.data is None:
+            self.data = {}
+        self.data[key] = value
     
     @property
     def atomic_number(self) -> int:
@@ -262,6 +293,7 @@ class Molecule:
         isotope: int | None = None,
         chirality: str | None = None,
         atom_class: int | None = None,
+        data: dict | None = None,
         # SMARTS query fields
         is_wildcard: bool = False,
         atom_list: list[str] | None = None,
@@ -274,6 +306,7 @@ class Molecule:
         connectivity_query: int | None = None,
         is_recursive: bool = False,
         recursive_smarts: str | None = None,
+        negated_recursive_smarts: list[str] | None = None,
         charge_query: int | None = None,
     ) -> int:
         """Add an atom to the molecule.
@@ -286,6 +319,7 @@ class Molecule:
             isotope: Mass number.
             chirality: Stereochemistry marker.
             atom_class: Atom class for reaction mapping.
+            data: User-defined metadata dictionary.
             is_wildcard: SMARTS wildcard atom.
             atom_list: SMARTS atom list [C,N,O].
             atom_list_negated: Whether atom list is negated [!C].
@@ -297,6 +331,7 @@ class Molecule:
             connectivity_query: SMARTS connectivity query.
             is_recursive: Whether this is a recursive SMARTS.
             recursive_smarts: The recursive SMARTS pattern.
+            negated_recursive_smarts: List of negated recursive SMARTS patterns !$(...).
             charge_query: SMARTS exact charge query [+0].
         
         Returns:
@@ -312,6 +347,7 @@ class Molecule:
             isotope=isotope,
             chirality=chirality,
             atom_class=atom_class,
+            data=dict(data) if data else None,
             is_wildcard=is_wildcard,
             atom_list=atom_list,
             atom_list_negated=atom_list_negated,
@@ -323,6 +359,7 @@ class Molecule:
             connectivity_query=connectivity_query,
             is_recursive=is_recursive,
             recursive_smarts=recursive_smarts,
+            negated_recursive_smarts=list(negated_recursive_smarts) if negated_recursive_smarts else None,
             charge_query=charge_query,
         )
         self.atoms.append(atom)
@@ -450,6 +487,7 @@ class Molecule:
                 isotope=atom.isotope,
                 chirality=atom.chirality,
                 atom_class=atom.atom_class,
+                data=dict(atom.data) if atom.data else None,
                 bond_indices=list(atom.bond_indices),
                 _was_first_in_component=atom._was_first_in_component,
                 is_wildcard=atom.is_wildcard,

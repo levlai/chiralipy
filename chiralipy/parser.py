@@ -578,6 +578,7 @@ class SmilesParser:
         connectivity_query: int | None = None
         is_recursive = False
         recursive_smarts: str | None = None
+        negated_recursive_smarts: list[str] = []
         atom_list: list[str] = []
         atomic_number_list: list[int] = []
         charge_query: int | None = None
@@ -792,7 +793,7 @@ class SmilesParser:
                         tok.next()  # consume $
                         tok.expect("(")
                         neg_recursive = self._read_recursive_smarts()
-                        # Could store negated recursive
+                        negated_recursive_smarts.append(neg_recursive)
                     else:
                         tok.next()
                 # Skip other negated things for now
@@ -833,6 +834,7 @@ class SmilesParser:
             connectivity_query=connectivity_query,
             is_recursive=is_recursive,
             recursive_smarts=recursive_smarts,
+            negated_recursive_smarts=negated_recursive_smarts if negated_recursive_smarts else None,
             charge_query=charge_query,
         )
         self._mol.atoms[atom_idx]._was_first_in_component = is_first

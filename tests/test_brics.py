@@ -329,6 +329,129 @@ class TestBRICSEdgeCases:
         assert len(fragments) >= 1
 
 
+class TestBRICSReturnStems:
+    """Test BRICS decomposition with return_stems=True."""
+    
+    def test_return_stems_basic(self) -> None:
+        """Test that return_stems returns valid stem indices."""
+        smiles = "CCCOCC"  # ether - cleaves at C-O bonds
+        mol = parse(smiles)
+        result = brics_decompose(mol, return_stems=True)
+        
+        # Should return a dict mapping SMILES to set of stem indices
+        assert isinstance(result, dict)
+        assert len(result) > 0
+        
+        # Each value should be a set of integers
+        for frag_smiles, stems in result.items():
+            assert isinstance(frag_smiles, str)
+            assert isinstance(stems, set)
+            for idx in stems:
+                assert isinstance(idx, int)
+                assert idx >= 0
+    
+    def test_return_stems_indices_are_fragment_local(self) -> None:
+        """Test that stem indices refer to positions within the fragment SMILES.
+        
+        When a molecule is cleaved, the returned indices should be relative to
+        each fragment's canonical SMILES, not the original molecule.
+        """
+        smiles = "O=C(O)CCN1C(=S)CSC1=S"  # propionyl-dithiohydantoin
+        mol = parse(smiles)
+        result = brics_decompose(mol, return_stems=True)
+        
+        assert isinstance(result, dict)
+        
+        # For each fragment, stem indices should be valid for that fragment
+        for frag_smiles, stems in result.items():
+            # Parse the fragment to get atom count
+            frag_mol = parse(frag_smiles)
+            num_atoms = frag_mol.num_atoms
+            
+            # All stem indices must be valid for this fragment
+            for idx in stems:
+                assert 0 <= idx < num_atoms, \
+                    f"Stem index {idx} out of range for fragment '{frag_smiles}' with {num_atoms} atoms"
+    
+    def test_return_stems_with_return_mols(self) -> None:
+        """Test return_stems combined with return_mols."""
+        smiles = "CCCOCC"
+        mol = parse(smiles)
+        result = brics_decompose(mol, return_stems=True, return_mols=True)
+        
+        # Should return list of (Molecule, set[int]) tuples
+        assert isinstance(result, list)
+        
+        for item in result:
+            assert isinstance(item, tuple)
+            assert len(item) == 2
+            frag_mol, stems = item
+            from chiralipy.types import Molecule
+            assert isinstance(frag_mol, Molecule)
+            assert isinstance(stems, set)
+            
+            # All stem indices must be valid for the fragment molecule
+            for idx in stems:
+                assert 0 <= idx < frag_mol.num_atoms
+    
+    def test_return_stems_no_dummy_atoms(self) -> None:
+        """Test that returned fragments don't contain dummy atoms."""
+        smiles = "CCOc1ccccc1"  # anisole
+        mol = parse(smiles)
+        result = brics_decompose(mol, return_stems=True)
+        
+        for frag_smiles, stems in result.items():
+            # Fragment SMILES should not contain dummy atoms
+            assert '*' not in frag_smiles, \
+                f"Fragment '{frag_smiles}' contains dummy atoms"
+            
+            # Parse and verify no dummy atoms
+            frag_mol = parse(frag_smiles)
+            for atom in frag_mol.atoms:
+                assert atom.symbol != '*', \
+                    f"Fragment '{frag_smiles}' contains dummy atom"
+    
+    def test_return_stems_stem_atoms_are_cleavage_points(self) -> None:
+        """Test that stem atoms are the actual cleavage points in the fragment."""
+        smiles = "CCOCC"  # diethyl ether
+        mol = parse(smiles)
+        result = brics_decompose(mol, return_stems=True, return_mols=True)
+        
+        # Should have fragments with stems
+        has_stems = any(len(stems) > 0 for _, stems in result)
+        assert has_stems, "Expected at least one fragment with stems"
+    
+    def test_return_stems_single_pass(self) -> None:
+        """Test return_stems with single_pass=True."""
+        smiles = "CCOCCOc1ccccc1"  # multiple cleavage sites
+        mol = parse(smiles)
+        result = brics_decompose(mol, return_stems=True, single_pass=True)
+        
+        assert isinstance(result, dict)
+        assert len(result) >= 1
+        
+        # Verify indices are valid
+        for frag_smiles, stems in result.items():
+            frag_mol = parse(frag_smiles)
+            for idx in stems:
+                assert 0 <= idx < frag_mol.num_atoms
+    
+    def test_return_stems_molecule_without_cleavage(self) -> None:
+        """Test return_stems on a molecule with no BRICS bonds."""
+        smiles = "c1ccccc1"  # benzene - no cleavable bonds
+        mol = parse(smiles)
+        result = brics_decompose(mol, return_stems=True)
+        
+        assert isinstance(result, dict)
+        # Should return original molecule with empty stems
+        assert len(result) >= 1
+        
+        # Original molecule should have no stems
+        for frag_smiles, stems in result.items():
+            assert stems == set(), \
+                f"Expected no stems for molecule without cleavage, got {stems}"
+
+
 class TestBRICSEnvironments:
     """Test BRICS environment matching."""
     

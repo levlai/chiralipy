@@ -370,6 +370,14 @@ def _atom_matches(
         if pattern_atom.symbol == '*' and not pattern_atom.atom_list:
             return True
     
+    # Handle negated recursive SMARTS !$(...)
+    if pattern_atom.negated_recursive_smarts:
+        for neg_smarts in pattern_atom.negated_recursive_smarts:
+            # If the atom DOES match the negated pattern, then it fails
+            if _matches_recursive_smarts(mol, mol_atom.idx, neg_smarts,
+                                         ring_count, ring_sizes, mol_ring_bonds):
+                return False
+    
     # Wildcard matches anything
     if pattern_atom.is_wildcard and not pattern_atom.atom_list:
         # But still check SMARTS queries if present

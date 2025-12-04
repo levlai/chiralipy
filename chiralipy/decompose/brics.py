@@ -143,11 +143,19 @@ def _ensure_pattern_groups():
             _PATTERNS_BY_SYMBOL[symbol].append(label)
 
 
-def find_brics_bonds(mol: Molecule) -> Iterator[tuple[tuple[int, int], tuple[str, str]]]:
+def find_brics_bonds(
+    mol: Molecule,
+    bond_orders: set[int] | None = None,
+) -> Iterator[tuple[tuple[int, int], tuple[str, str]]]:
     """Find bonds in a molecule that BRICS would cleave.
     
     Args:
         mol: Molecule to analyze.
+        bond_orders: Set of bond orders to consider for cleavage.
+            If None, all bond orders are considered (default BRICS behavior).
+            Use {1} for single bonds only, {2} for double bonds only.
+            BRICS primarily cleaves single bonds; double bond cleavage is rare
+            (only L7a-L7b olefin C=C bonds).
     
     Yields:
         Tuples of ((atom1_idx, atom2_idx), (label1, label2)) for each cleavable bond.
@@ -156,6 +164,8 @@ def find_brics_bonds(mol: Molecule) -> Iterator[tuple[tuple[int, int], tuple[str
         >>> mol = parse("CCCOCC")
         >>> bonds = list(find_brics_bonds(mol))
         >>> # Returns bonds that can be cleaved according to BRICS rules
+        >>> bonds_single = list(find_brics_bonds(mol, bond_orders={1}))
+        >>> # Returns only single bonds that can be cleaved
     """
     from chiralipy.match import RingInfo, match_at_root
 
@@ -191,6 +201,10 @@ def find_brics_bonds(mol: Molecule) -> Iterator[tuple[tuple[int, int], tuple[str
             continue
         
         if bond_key in bonds_found:
+            continue
+        
+        # Filter by bond order if specified
+        if bond_orders is not None and bond.order not in bond_orders:
             continue
         
         # Get rules for this bond order only (avoids checking order for every rule)
@@ -250,6 +264,7 @@ def break_brics_bonds(
             isotope=atom.isotope,
             chirality=atom.chirality,
             atom_class=atom.atom_class,
+            data=dict(atom.data) if atom.data else None,
         )
         new_atoms.append(new_atom)
     
@@ -397,6 +412,7 @@ def _get_fragments(mol: Molecule) -> list[Molecule]:
                 isotope=old_atom.isotope,
                 chirality=old_atom.chirality,
                 atom_class=old_atom.atom_class,
+                data=dict(old_atom.data) if old_atom.data else None,
             )
             new_atom.bond_indices = []
             frag.atoms.append(new_atom)
@@ -428,37 +444,43 @@ def _get_fragments(mol: Molecule) -> list[Molecule]:
     return fragments
 
 
-def _get_stems(mol: Molecule) -> set[int]:
-    """Extract original atom indices at cleavage points from a molecule.
-    
-    The atom indices are stored in the atom_class field of dummy atoms
-    during bond breaking.
+def _get_stem_atom_indices(mol: Molecule) -> set[int]:
+    """Find indices of real atoms that are bonded to dummy atoms.
     
     Args:
-        mol: Molecule to extract stems from.
+        mol: Molecule with dummy atoms still present.
     
     Returns:
-        Set of original atom indices where cleavages occurred.
+        Set of atom indices (in the current molecule) that are stems.
     """
-    stems: set[int] = set()
+    stem_indices: set[int] = set()
     for atom in mol.atoms:
-        if atom.symbol == '*' and atom.atom_class is not None:
-            stems.add(atom.atom_class)
-    return stems
+        if atom.symbol == '*':
+            for bond_idx in atom.bond_indices:
+                bond = mol.bonds[bond_idx]
+                neighbor_idx = bond.other_atom(atom.idx)
+                neighbor = mol.atoms[neighbor_idx]
+                if neighbor.symbol != '*':
+                    stem_indices.add(neighbor_idx)
+    return stem_indices
 
 
-def _strip_dummy_atoms(mol: Molecule) -> Molecule:
-    """Remove dummy atoms (*) from a molecule, keeping only real atoms.
+def _strip_dummy_atoms_and_mark_stems(mol: Molecule) -> Molecule:
+    """Remove dummy atoms (*) from a molecule and mark stem atoms in data dict.
     
     The bonds to dummy atoms are removed, leaving the attachment point atoms
-    with their original connectivity (minus the dummy).
+    with their original connectivity (minus the dummy). Stem atoms are marked
+    with data['is_stem']=True so they can be identified after canonicalization.
     
     Args:
         mol: Molecule to strip dummy atoms from.
     
     Returns:
-        New molecule without dummy atoms.
+        New molecule without dummy atoms, with stem atoms marked via data['is_stem'].
     """
+    # Find stem atoms (real atoms bonded to dummies)
+    stem_old_indices = _get_stem_atom_indices(mol)
+    
     # Find indices of real (non-dummy) atoms
     real_atom_indices: list[int] = []
     for atom in mol.atoms:
@@ -481,6 +503,11 @@ def _strip_dummy_atoms(mol: Molecule) -> Molecule:
     
     for old_idx in real_atom_indices:
         old_atom = mol.atoms[old_idx]
+        is_stem = old_idx in stem_old_indices
+        # Copy existing data and add is_stem flag
+        new_data = dict(old_atom.data) if old_atom.data else {}
+        if is_stem:
+            new_data['is_stem'] = True
         new_atom = Atom(
             idx=old_to_new[old_idx],
             symbol=old_atom.symbol,
@@ -490,6 +517,7 @@ def _strip_dummy_atoms(mol: Molecule) -> Molecule:
             isotope=old_atom.isotope,
             chirality=old_atom.chirality,
             atom_class=old_atom.atom_class,
+            data=new_data if new_data else None,
         )
         new_atom.bond_indices = []
         new_mol.atoms.append(new_atom)
@@ -516,6 +544,56 @@ def _strip_dummy_atoms(mol: Molecule) -> Molecule:
     return new_mol
 
 
+def _to_smiles_with_stems(mol: Molecule) -> tuple[str, set[int]]:
+    """Convert molecule to canonical SMILES and extract stem indices.
+    
+    Stem atoms must be marked with data['is_stem']=True (via _strip_dummy_atoms_and_mark_stems).
+    Returns the canonical SMILES and the set of atom indices in the canonical SMILES that are stems.
+    
+    Args:
+        mol: Molecule with stem atoms marked via data['is_stem'].
+    
+    Returns:
+        Tuple of (canonical_smiles, set of stem indices in the canonical SMILES).
+    """
+    from chiralipy.canon import canonical_ranks
+    
+    # Get canonical ranks
+    ranks = canonical_ranks(mol)
+    
+    # Generate canonical SMILES
+    smiles = to_smiles(mol, ranks)
+    
+    # Parse the canonical SMILES to get atoms in canonical order
+    parsed = parse(smiles)
+    
+    # The parsed molecule has atoms in SMILES traversal order.
+    # We need to match atoms from original mol to parsed mol to transfer stem info.
+    # Since both are canonical representations of the same molecule,
+    # we can use the canonical ranks to create a mapping.
+    
+    # For each atom in parsed mol, find the corresponding atom in original mol
+    # by matching their canonical positions
+    
+    # Create rank -> original_idx mapping
+    rank_to_orig: dict[int, int] = {ranks[i]: i for i in range(len(mol.atoms))}
+    
+    # Get ranks for parsed molecule
+    parsed_ranks = canonical_ranks(parsed)
+    
+    # Find stems in parsed molecule by matching ranks
+    stem_indices: set[int] = set()
+    for parsed_idx in range(len(parsed.atoms)):
+        parsed_rank = parsed_ranks[parsed_idx]
+        if parsed_rank in rank_to_orig:
+            orig_idx = rank_to_orig[parsed_rank]
+            orig_atom = mol.atoms[orig_idx]
+            if orig_atom.data and orig_atom.data.get('is_stem'):
+                stem_indices.add(parsed_idx)
+    
+    return smiles, stem_indices
+
+
 def brics_decompose(
     mol: Molecule,
     min_fragment_size: int = 1,
@@ -523,6 +601,7 @@ def brics_decompose(
     single_pass: bool = False,
     return_mols: bool = False,
     return_stems: bool = False,
+    bond_orders: set[int] | None = None,
 ) -> set[str] | list[Molecule] | dict[str, set[int]] | list[tuple[Molecule, set[int]]]:
     """Perform BRICS decomposition on a molecule.
     
@@ -535,15 +614,21 @@ def brics_decompose(
         single_pass: If True, only break bonds once. If False (default),
             recursively decompose fragments until no more BRICS bonds remain.
         return_mols: If True, return Molecule objects instead of SMILES.
-        return_stems: If True, return original atom indices at cleavage points.
+        return_stems: If True, return fragment-local atom indices at cleavage points.
             Dummy atoms are removed from the fragments, leaving only real atoms.
+            The indices refer to atom positions within each fragment's SMILES.
             When combined with return_mols=False, returns dict mapping SMILES to atom index sets.
             When combined with return_mols=True, returns list of (Molecule, atom_indices) tuples.
+        bond_orders: Set of bond orders to consider for cleavage.
+            If None, all bond orders are considered (default BRICS behavior).
+            Use {1} for single bonds only, {2} for double bonds only.
+            BRICS primarily cleaves single bonds; double bond cleavage is rare
+            (only L7a-L7b olefin C=C bonds).
     
     Returns:
         - set[str]: SMILES strings (default)
         - list[Molecule]: If return_mols=True
-        - dict[str, set[int]]: If return_stems=True (SMILES -> original atom indices)
+        - dict[str, set[int]]: If return_stems=True (SMILES -> fragment-local atom indices)
         - list[tuple[Molecule, set[int]]]: If return_mols=True and return_stems=True
     
     Example:
@@ -553,11 +638,13 @@ def brics_decompose(
         ['[16*]c1ccc([16*])cc1', '[3*]O[3*]', '[4*]CC', '[8*]CC']
         >>> frags_with_stems = brics_decompose(mol, return_stems=True)
         >>> # Returns atom indices where cleavages occurred
+        >>> frags_single = brics_decompose(mol, bond_orders={1})
+        >>> # Only cleave single bonds
     """
     mol_smi = to_smiles(mol)
     
     # Find all cleavable bonds
-    bonds = list(find_brics_bonds(mol))
+    bonds = list(find_brics_bonds(mol, bond_orders=bond_orders))
     
     if not bonds:
         if return_mols and return_stems:
@@ -587,11 +674,21 @@ def brics_decompose(
             all_frags = valid_fragments
         
         if return_mols and return_stems:
-            return [(_strip_dummy_atoms(f), _get_stems(f)) for f in all_frags]
+            result = []
+            for f in all_frags:
+                stripped = _strip_dummy_atoms_and_mark_stems(f)
+                stems = {a.idx for a in stripped.atoms if a.data and a.data.get('is_stem')}
+                result.append((stripped, stems))
+            return result
         if return_mols:
             return all_frags
         if return_stems:
-            return {to_smiles(_strip_dummy_atoms(f)): _get_stems(f) for f in all_frags}
+            result_dict: dict[str, set[int]] = {}
+            for f in all_frags:
+                stripped = _strip_dummy_atoms_and_mark_stems(f)
+                smiles, stems = _to_smiles_with_stems(stripped)
+                result_dict[smiles] = stems
+            return result_dict
         return {to_smiles(f) for f in all_frags}
     
     # Recursive decomposition: continue until no more bonds can be broken
@@ -602,7 +699,7 @@ def brics_decompose(
     while to_process:
         next_round: list[Molecule] = []
         for frag in to_process:
-            frag_bonds = list(find_brics_bonds(frag))
+            frag_bonds = list(find_brics_bonds(frag, bond_orders=bond_orders))
             if not frag_bonds:
                 # No more bonds to break, this is a leaf fragment
                 final_fragments.append(frag)
@@ -621,9 +718,19 @@ def brics_decompose(
     all_fragments = intermediate_fragments + final_fragments
     
     if return_mols and return_stems:
-        return [(_strip_dummy_atoms(f), _get_stems(f)) for f in all_fragments]
+        result = []
+        for f in all_fragments:
+            stripped = _strip_dummy_atoms_and_mark_stems(f)
+            stems = {a.idx for a in stripped.atoms if a.data and a.data.get('is_stem')}
+            result.append((stripped, stems))
+        return result
     if return_mols:
         return all_fragments
     if return_stems:
-        return {to_smiles(_strip_dummy_atoms(f)): _get_stems(f) for f in all_fragments}
+        result_dict = {}
+        for f in all_fragments:
+            stripped = _strip_dummy_atoms_and_mark_stems(f)
+            smiles, stems = _to_smiles_with_stems(stripped)
+            result_dict[smiles] = stems
+        return result_dict
     return {to_smiles(f) for f in all_fragments}
