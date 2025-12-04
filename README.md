@@ -2,13 +2,14 @@
 
 Chiralipy is a pure Python library for SMILES/SMARTS parsing, canonicalization, and molecular manipulation.
 
-## Installation
+## Installation from source
 
 ```bash
 pip install -e .
 ```
 
-or pip install chiralipy
+## Installation with pip
+pip install chiralipy
 
 
 ## Quick Start
