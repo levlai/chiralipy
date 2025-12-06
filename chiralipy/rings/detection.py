@@ -348,17 +348,21 @@ def get_ring_membership(mol: "Molecule") -> dict[int, int]:
 def get_ring_info(
     mol: "Molecule",
     _ring_atoms: set[int] | None = None,
+    _use_sssr: bool = True,
 ) -> tuple[dict[int, int], dict[int, set[int]]]:
     """Get ring membership and sizes for each atom.
     
     This is useful for SMARTS queries like [R] (in ring), [R2] (in 2 rings),
     [r5] (in 5-membered ring), etc.
     
-    Uses a BFS-based algorithm to find all simple cycles.
+    Uses the SSSR (Smallest Set of Smallest Rings) for accurate counts when
+    _use_sssr is True, otherwise uses fast BFS-based detection.
     
     Args:
         mol: Molecule to analyze.
         _ring_atoms: Optional precomputed ring atoms (internal optimization).
+        _use_sssr: If True, use SSSR for accurate counts. If False, use
+            fast approximation (may overcount for fused rings).
     
     Returns:
         A tuple of (ring_count, ring_sizes) where:
@@ -388,60 +392,112 @@ def get_ring_info(
     if not ring_atoms:
         return ring_count, ring_sizes
     
-    # Build adjacency list
-    adj: dict[int, set[int]] = {i: set() for i in range(mol.num_atoms)}
-    for bond in mol.bonds:
-        adj[bond.atom1_idx].add(bond.atom2_idx)
-        adj[bond.atom2_idx].add(bond.atom1_idx)
-    
-    # Find all simple cycles using BFS from each edge
-    # For each edge (start, first_nbr), find shortest path back to start
-    found_rings: set[frozenset[int]] = set()
-    
-    # Only start from ring atoms (optimization)
-    for start in ring_atoms:
-        for first_nbr in adj[start]:
-            if first_nbr not in ring_atoms:
-                continue  # Skip non-ring neighbors
-                
-            # Find shortest path from first_nbr back to start
-            # without using the direct start-first_nbr edge
-            visited: dict[int, int | None] = {first_nbr: None}
-            queue: list[int] = [first_nbr]
-            path_found = False
-            
-            while queue and not path_found:
-                current = queue.pop(0)
-                
-                for nbr in adj[current]:
-                    if nbr == start:
-                        # Check we're not just going back on the original edge
-                        if current != first_nbr:
-                            # Found a cycle - reconstruct it
-                            cycle: list[int] = [start]
-                            node: int | None = current
-                            while node is not None:
-                                cycle.append(node)
-                                node = visited[node]
-                            
-                            ring = frozenset(cycle)
-                            if len(ring) >= 3:  # Valid ring
-                                found_rings.add(ring)
-                            path_found = True
-                            break
-                    
-                    elif nbr not in visited:
-                        visited[nbr] = current
-                        queue.append(nbr)
-    
-    # Update ring counts and sizes
-    for ring in found_rings:
-        size = len(ring)
-        for atom_idx in ring:
-            ring_count[atom_idx] += 1
-            ring_sizes[atom_idx].add(size)
+    if _use_sssr:
+        # Use SSSR for accurate ring count/size information
+        # This is more expensive but gives correct counts
+        sssr = find_sssr(mol)
+        
+        # Update ring counts and sizes from SSSR
+        for ring in sssr:
+            size = len(ring)
+            for atom_idx in ring:
+                ring_count[atom_idx] += 1
+                ring_sizes[atom_idx].add(size)
+    else:
+        # Fast approximation: just mark ring membership
+        # This doesn't give accurate counts for fused rings
+        for atom_idx in ring_atoms:
+            ring_count[atom_idx] = 1
     
     return ring_count, ring_sizes
+
+
+def get_ring_info_fast(mol: "Molecule") -> tuple[dict[int, int], dict[int, set[int]]]:
+    """Fast ring detection without accurate counts.
+    
+    Returns ring_count with 1 for atoms in any ring, 0 otherwise.
+    ring_sizes will be empty (no size information).
+    
+    Use this for SMARTS queries that only check [R] (in ring) or [R0] (not in ring),
+    but don't need [R2] or [r5] type queries.
+    
+    Args:
+        mol: Molecule to analyze.
+    
+    Returns:
+        Tuple of (ring_count, ring_sizes) - ring_sizes will be empty sets.
+    """
+    ring_atoms, _ = _find_ring_atoms_and_bonds_fast(mol)
+    ring_count = {i: (1 if i in ring_atoms else 0) for i in range(mol.num_atoms)}
+    ring_sizes: dict[int, set[int]] = {i: set() for i in range(mol.num_atoms)}
+    return ring_count, ring_sizes
+
+
+def get_min_ring_sizes(mol: "Molecule", ring_atoms: set[int] | None = None) -> dict[int, int]:
+    """Get minimum ring size for each atom efficiently using BFS.
+    
+    For each ring atom, finds the smallest ring it participates in using
+    BFS from each atom. This is O(V * E) in the worst case but typically
+    much faster for drug-like molecules.
+    
+    Args:
+        mol: Molecule to analyze.
+        ring_atoms: Optional precomputed set of ring atom indices.
+    
+    Returns:
+        Dict mapping atom index to minimum ring size (0 if not in any ring).
+    """
+    n = mol.num_atoms
+    if n == 0:
+        return {}
+    
+    if ring_atoms is None:
+        ring_atoms, _ = _find_ring_atoms_and_bonds_fast(mol)
+    
+    min_ring_size: dict[int, int] = {i: 0 for i in range(n)}
+    
+    if not ring_atoms:
+        return min_ring_size
+    
+    # Build adjacency list
+    adj: dict[int, list[int]] = {i: [] for i in range(n)}
+    for bond in mol.bonds:
+        adj[bond.atom1_idx].append(bond.atom2_idx)
+        adj[bond.atom2_idx].append(bond.atom1_idx)
+    
+    # For each ring atom, find shortest cycle through it using BFS
+    for start in ring_atoms:
+        # BFS to find shortest path back to start
+        # dist[i] = distance from start to i (excluding direct edge)
+        dist: dict[int, int] = {start: 0}
+        parent: dict[int, int] = {start: -1}
+        queue: list[int] = [start]
+        min_cycle = float('inf')
+        
+        while queue:
+            curr = queue.pop(0)
+            curr_dist = dist[curr]
+            
+            # Early termination if we already found a small cycle
+            if curr_dist >= min_cycle // 2:
+                break
+            
+            for nbr in adj[curr]:
+                if nbr not in dist:
+                    dist[nbr] = curr_dist + 1
+                    parent[nbr] = curr
+                    queue.append(nbr)
+                elif nbr != parent.get(curr, -1):
+                    # Found a cycle - check if it goes through start
+                    # The cycle length is dist[curr] + dist[nbr] + 1
+                    cycle_len = dist[curr] + dist[nbr] + 1
+                    if cycle_len < min_cycle:
+                        min_cycle = cycle_len
+        
+        if min_cycle < float('inf'):
+            min_ring_size[start] = int(min_cycle)
+    
+    return min_ring_size
 
 
 def get_ring_bonds(mol: "Molecule") -> set[tuple[int, int]]:

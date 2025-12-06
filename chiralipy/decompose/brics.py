@@ -197,10 +197,20 @@ def find_brics_bonds(
 
     _ensure_pattern_groups()
     
+    # Pre-compute environment matches for all atoms at once
+    # This is more cache-friendly than checking each atom against each pattern
     env_matches: dict[str, set[int]] = {label: set() for label in ENVIRONS}
     
+    # Cache pattern references and adjacency lists
+    patterns: dict[str, Molecule | None] = {}
+    pattern_adjs: dict[str, dict[int, list[tuple[int, int]]] | None] = {}
+    for label in ENVIRONS:
+        patterns[label] = _get_pattern(label)
+        pattern_adjs[label] = _PATTERN_ADJS.get(label)
+    
     # Iterate over atoms and check relevant patterns
-    for atom in mol.atoms:
+    mol_atoms = mol.atoms  # Local reference for faster attribute access
+    for atom in mol_atoms:
         symbol = atom.symbol.upper()
         candidates = _PATTERNS_BY_SYMBOL.get(symbol)
         
@@ -212,35 +222,37 @@ def find_brics_bonds(
         else:
             continue
         
+        atom_idx = atom.idx
         for label in candidates:
-            pattern = _get_pattern(label)
-            # Pass precomputed adjacency to avoid rebuilding it in match_at_root
-            if pattern and match_at_root(mol, atom.idx, pattern, ring_info, pattern_adj=_PATTERN_ADJS.get(label)):
-                env_matches[label].add(atom.idx)
+            pattern = patterns[label]
+            if pattern and match_at_root(mol, atom_idx, pattern, ring_info, pattern_adj=pattern_adjs[label]):
+                env_matches[label].add(atom_idx)
     
     bonds_found: set[tuple[int, int]] = set()
-    ring_bonds = ring_info.ring_bonds
+    ring_bonds_set = ring_info.ring_bonds
     
     # Pre-compute label numeric parts to avoid repeated string operations
     label_nums: dict[str, str] = {label: ''.join(c for c in label if c.isdigit()) for label in ENVIRONS}
     
-    for bond in mol.bonds:
+    mol_bonds = mol.bonds  # Local reference
+    for bond in mol_bonds:
         atom1_idx = bond.atom1_idx
         atom2_idx = bond.atom2_idx
         bond_key = (min(atom1_idx, atom2_idx), max(atom1_idx, atom2_idx))
         
-        if bond_key in ring_bonds:
+        if bond_key in ring_bonds_set:
             continue
         
         if bond_key in bonds_found:
             continue
         
         # Filter by bond order if specified
-        if bond_orders is not None and bond.order not in bond_orders:
+        bond_order = bond.order
+        if bond_orders is not None and bond_order not in bond_orders:
             continue
         
         # Get rules for this bond order only (avoids checking order for every rule)
-        rules_for_order = BRICS_RULES_BY_ORDER.get(bond.order)
+        rules_for_order = BRICS_RULES_BY_ORDER.get(bond_order)
         if not rules_for_order:
             continue
         
@@ -513,41 +525,46 @@ def _get_fragments(mol: Molecule) -> list[Molecule]:
     if num_atoms == 0:
         return []
     
-    # Use list[bool] instead of set[int] for O(1) access without hashing
-    visited: list[bool] = [False] * num_atoms
-    components: list[set[int]] = []
-    atoms = mol.atoms  # Local reference for faster access
-    bonds = mol.bonds
+    # Union-Find for faster component detection
+    parent: list[int] = list(range(num_atoms))
+    rank: list[int] = [0] * num_atoms
     
-    def dfs(start: int) -> set[int]:
-        component: set[int] = set()
-        stack = [start]
-        while stack:
-            atom_idx = stack.pop()
-            if visited[atom_idx]:
-                continue
-            visited[atom_idx] = True
-            component.add(atom_idx)
-            
-            atom = atoms[atom_idx]
-            for bond_idx in atom.bond_indices:
-                bond = bonds[bond_idx]
-                neighbor = bond.other_atom(atom_idx)
-                if not visited[neighbor]:
-                    stack.append(neighbor)
-        return component
+    def find(x: int) -> int:
+        if parent[x] != x:
+            parent[x] = find(parent[x])  # Path compression
+        return parent[x]
     
+    def union(x: int, y: int) -> None:
+        px, py = find(x), find(y)
+        if px != py:
+            # Union by rank
+            if rank[px] < rank[py]:
+                px, py = py, px
+            parent[py] = px
+            if rank[px] == rank[py]:
+                rank[px] += 1
+    
+    # Build components using union-find (faster than DFS for this case)
+    for bond in mol.bonds:
+        union(bond.atom1_idx, bond.atom2_idx)
+    
+    # Group atoms by component
+    component_atoms: dict[int, list[int]] = {}
     for i in range(num_atoms):
-        if not visited[i]:
-            component = dfs(i)
-            components.append(component)
+        root = find(i)
+        if root not in component_atoms:
+            component_atoms[root] = []
+        component_atoms[root].append(i)
     
-    if len(components) <= 1:
+    if len(component_atoms) <= 1:
         return [deepcopy(mol)]
     
     fragments: list[Molecule] = []
+    atoms = mol.atoms  # Local reference
+    bonds = mol.bonds
     
-    for component in components:
+    for component in component_atoms.values():
+        component_set = set(component)
         old_to_new: dict[int, int] = {}
         for new_idx, old_idx in enumerate(sorted(component)):
             old_to_new[old_idx] = new_idx
@@ -556,7 +573,7 @@ def _get_fragments(mol: Molecule) -> list[Molecule]:
         
         # First pass: create atoms
         for old_idx in sorted(component):
-            old_atom = mol.atoms[old_idx]
+            old_atom = atoms[old_idx]
             new_atom = Atom(
                 idx=old_to_new[old_idx],
                 symbol=old_atom.symbol,
@@ -576,13 +593,13 @@ def _get_fragments(mol: Molecule) -> list[Molecule]:
         old_bond_to_new: dict[int, int] = {}
         added_bonds: set[int] = set()
         for old_idx in component:
-            old_atom = mol.atoms[old_idx]
+            old_atom = atoms[old_idx]
             for bond_idx in old_atom.bond_indices:
                 if bond_idx in added_bonds:
                     continue
                 
-                bond = mol.bonds[bond_idx]
-                if bond.atom1_idx in component and bond.atom2_idx in component:
+                bond = bonds[bond_idx]
+                if bond.atom1_idx in component_set and bond.atom2_idx in component_set:
                     new_bond_idx = len(frag.bonds)
                     new_bond = Bond(
                         idx=new_bond_idx,

@@ -45,15 +45,28 @@ class RingInfo:
     ring_bonds: set[tuple[int, int]]
     
     @classmethod
-    def from_molecule(cls, mol: "Molecule") -> "RingInfo":
+    def from_molecule(cls, mol: "Molecule", fast: bool = False) -> "RingInfo":
         """Compute ring info for a molecule.
+        
+        Args:
+            mol: Molecule to analyze.
+            fast: If True, use fast detection without accurate ring counts.
+                Only suitable for queries that check ring membership (R/R0),
+                not specific ring counts (R2) or sizes (r5).
         
         Optimized to call the fast ring detection algorithm only once.
         """
         # Compute ring atoms and bonds in one pass
         ring_atoms, ring_bonds = _find_ring_atoms_and_bonds_fast(mol)
-        # Pass precomputed ring atoms to avoid recomputation
-        ring_count, ring_sizes = get_ring_info(mol, _ring_atoms=ring_atoms)
+        
+        if fast:
+            # Fast path: just ring membership, no counts/sizes
+            ring_count = {i: (1 if i in ring_atoms else 0) for i in range(mol.num_atoms)}
+            ring_sizes: dict[int, set[int]] = {i: set() for i in range(mol.num_atoms)}
+        else:
+            # Full SSSR-based computation
+            ring_count, ring_sizes = get_ring_info(mol, _ring_atoms=ring_atoms)
+        
         return cls(ring_count=ring_count, ring_sizes=ring_sizes, ring_bonds=ring_bonds)
 
 
@@ -178,43 +191,49 @@ def _matches_recursive_smarts(
     if mol_ring_bonds is None:
         mol_ring_bonds = get_ring_bonds(mol)
     
-    # Cache pattern size to avoid repeated property access
+    # Cache pattern size and molecule references
     pattern_n = pattern.num_atoms
+    mol_atoms = mol.atoms
+    mol_bonds = mol.bonds
+    pattern_atoms = pattern.atoms
+    pattern_bonds = pattern.bonds
+    mol_num_atoms = mol.num_atoms
     
-    def try_match(mapping: dict[int, int], pattern_idx: int) -> bool:
+    # Use list-based mapping for faster access
+    mapping: list[int] = [-1] * pattern_n
+    mapping[0] = atom_idx
+    used: list[bool] = [False] * mol_num_atoms
+    used[atom_idx] = True
+    
+    def try_match(pattern_idx: int) -> bool:
         """Try to extend the mapping from pattern atoms to molecule atoms."""
         if pattern_idx == pattern_n:
             return True
         
-        if pattern_idx == 0:
-            # First atom must be atom_idx - basic checks already done above
-            mapping[0] = atom_idx
-            return try_match(mapping, 1)
-        
-        p_atom = pattern.atoms[pattern_idx]
+        p_atom = pattern_atoms[pattern_idx]
         
         # Find candidates from mapped neighbors
         candidates: set[int] = set()
         for nbr_idx, bond_idx in pattern_adj[pattern_idx]:
-            if nbr_idx in mapping:
-                mol_nbr_idx = mapping[nbr_idx]
-                mol_nbr = mol.atoms[mol_nbr_idx]
+            mol_nbr_idx = mapping[nbr_idx]
+            if mol_nbr_idx >= 0:  # Neighbor is mapped
+                mol_nbr = mol_atoms[mol_nbr_idx]
                 
                 for mol_bond_idx in mol_nbr.bond_indices:
-                    mol_bond = mol.bonds[mol_bond_idx]
+                    mol_bond = mol_bonds[mol_bond_idx]
                     mol_other = mol_bond.other_atom(mol_nbr_idx)
                     
                     # Check bond matches
-                    pattern_bond = pattern.bonds[bond_idx]
+                    pattern_bond = pattern_bonds[bond_idx]
                     if _bond_matches(mol_bond, pattern_bond, mol_ring_bonds):
-                        if mol_other not in mapping.values():
+                        if not used[mol_other]:
                             candidates.add(mol_other)
         
         if not candidates:
             return False
         
         for mol_idx in candidates:
-            m_atom = mol.atoms[mol_idx]
+            m_atom = mol_atoms[mol_idx]
             
             # Check atom matches
             if not _atom_matches_basic(m_atom, p_atom, mol, ring_count, ring_sizes):
@@ -223,13 +242,13 @@ def _matches_recursive_smarts(
             # Check all bonds to mapped neighbors
             ok = True
             for nbr_idx, bond_idx in pattern_adj[pattern_idx]:
-                if nbr_idx in mapping:
-                    mol_nbr_idx = mapping[nbr_idx]
+                mol_nbr_idx = mapping[nbr_idx]
+                if mol_nbr_idx >= 0:
                     mol_bond = _get_bond_between(mol, mol_idx, mol_nbr_idx)
                     if mol_bond is None:
                         ok = False
                         break
-                    pattern_bond = pattern.bonds[bond_idx]
+                    pattern_bond = pattern_bonds[bond_idx]
                     if not _bond_matches(mol_bond, pattern_bond, mol_ring_bonds):
                         ok = False
                         break
@@ -238,13 +257,15 @@ def _matches_recursive_smarts(
                 continue
             
             mapping[pattern_idx] = mol_idx
-            if try_match(mapping, pattern_idx + 1):
+            used[mol_idx] = True
+            if try_match(pattern_idx + 1):
                 return True
-            del mapping[pattern_idx]
+            mapping[pattern_idx] = -1
+            used[mol_idx] = False
         
         return False
     
-    return try_match({}, 0)
+    return try_match(1)  # Start from 1 since 0 is already mapped
 
 
 def _atom_matches_basic(
@@ -254,7 +275,13 @@ def _atom_matches_basic(
     ring_count: dict[int, int],
     _ring_sizes: dict[int, set[int]],
 ) -> bool:
-    """Basic atom matching without recursive SMARTS handling."""
+    """Basic atom matching without recursive SMARTS handling.
+    
+    Optimized for the common case of simple SMARTS patterns.
+    """
+    # Fast path: check symbol first (most common rejection)
+    mol_symbol_upper = mol_atom.symbol.upper()
+    
     # Negated atomic number list [!#6;!#16;!#0;!#1] - atom must NOT be any of these
     if pattern_atom.negated_atomic_number_list:
         if mol_atom.atomic_number in pattern_atom.negated_atomic_number_list:
@@ -270,19 +297,18 @@ def _atom_matches_basic(
         pass
     elif pattern_atom.atom_list:
         # Check atom list
-        mol_symbol = mol_atom.symbol.upper()
         pattern_symbols = [s.upper() for s in pattern_atom.atom_list]
         if pattern_atom.atom_list_negated:
-            if mol_symbol in pattern_symbols:
+            if mol_symbol_upper in pattern_symbols:
                 return False
         else:
-            if mol_symbol not in pattern_symbols:
+            if mol_symbol_upper not in pattern_symbols:
                 return False
     elif pattern_atom.atom_list_negated:
-        if mol_atom.symbol.upper() == pattern_atom.symbol.upper():
+        if mol_symbol_upper == pattern_atom.symbol.upper():
             return False
     elif not pattern_atom.is_wildcard and pattern_atom.symbol != '*':
-        if mol_atom.symbol.upper() != pattern_atom.symbol.upper():
+        if mol_symbol_upper != pattern_atom.symbol.upper():
             return False
     
     # Aromaticity - skip if matching by atomic number list or negated atomic number list
@@ -294,16 +320,17 @@ def _atom_matches_basic(
                 if mol_atom.is_aromatic:
                     return False
     
-    # Ring membership
-    if pattern_atom.ring_count is not None:
+    # Ring membership - use direct dict access
+    pattern_ring_count = pattern_atom.ring_count
+    if pattern_ring_count is not None:
         atom_ring_count = ring_count.get(mol_atom.idx, 0)
-        if pattern_atom.ring_count == -1:
+        if pattern_ring_count == -1:
             if atom_ring_count == 0:
                 return False
-        elif pattern_atom.ring_count == 0:
+        elif pattern_ring_count == 0:
             if atom_ring_count > 0:
                 return False
-        elif atom_ring_count != pattern_atom.ring_count:
+        elif atom_ring_count != pattern_ring_count:
             return False
     
     # Degree - if degree_query_list is present, use it (OR'd degrees like [D2,D3])
@@ -472,50 +499,57 @@ def _bond_matches(
     
     Returns:
         True if the molecule bond satisfies the pattern constraints.
-    """
-    # Check ring bond constraint (e.g., -;@ or -;!@)
-    if mol_ring_bonds is not None:
-        bond_key = (min(mol_bond.atom1_idx, mol_bond.atom2_idx),
-                   max(mol_bond.atom1_idx, mol_bond.atom2_idx))
-        is_ring = bond_key in mol_ring_bonds
-        
-        # Check !@ constraint (must NOT be ring bond)
-        if pattern_bond.is_not_ring_bond:
-            if is_ring:
-                return False
-        
-        # Check @ constraint (must be ring bond)
-        if pattern_bond.is_ring_bond:
-            if not is_ring:
-                return False
     
-    # Any bond (~) matches everything
+    Optimized for common cases (single/aromatic bonds with ring constraints).
+    """
+    # Fast path: Any bond (~) matches everything
     if pattern_bond.is_any:
         return True
+    
+    # Cache commonly accessed attributes
+    mol_order = mol_bond.order
+    mol_aromatic = mol_bond.is_aromatic
+    pattern_order = pattern_bond.order
+    pattern_aromatic = pattern_bond.is_aromatic
+    
+    # Check ring bond constraint (e.g., -;@ or -;!@) - common in BRICS
+    if pattern_bond.is_not_ring_bond or pattern_bond.is_ring_bond:
+        if mol_ring_bonds is not None:
+            a1, a2 = mol_bond.atom1_idx, mol_bond.atom2_idx
+            bond_key = (a1, a2) if a1 < a2 else (a2, a1)
+            is_ring = bond_key in mol_ring_bonds
+            
+            # Check !@ constraint (must NOT be ring bond)
+            if pattern_bond.is_not_ring_bond and is_ring:
+                return False
+            
+            # Check @ constraint (must be ring bond)
+            if pattern_bond.is_ring_bond and not is_ring:
+                return False
     
     # Handle negated bonds (!-, !=, !#)
     if pattern_bond.is_negated:
         # Negated bond: must NOT match the specified order
-        if pattern_bond.is_aromatic:
-            return not mol_bond.is_aromatic
+        if pattern_aromatic:
+            return not mol_aromatic
         # For negated single bond !-, any non-single bond matches
         # (including double, triple, aromatic)
-        if mol_bond.order == pattern_bond.order:
+        if mol_order == pattern_order:
             return False
-        if pattern_bond.order == 1 and mol_bond.is_aromatic:
+        if pattern_order == 1 and mol_aromatic:
             return False  # Aromatic bonds are considered single-ish for matching
         return True
     
-    # Aromatic bond
-    if pattern_bond.is_aromatic:
-        return mol_bond.is_aromatic
+    # Aromatic bond pattern
+    if pattern_aromatic:
+        return mol_aromatic
     
-    # Specific bond order
-    if pattern_bond.order == mol_bond.order:
+    # Specific bond order match
+    if pattern_order == mol_order:
         return True
     
     # Single bond pattern can match aromatic (implicit in aromatic systems)
-    if pattern_bond.order == 1 and mol_bond.is_aromatic:
+    if pattern_order == 1 and mol_aromatic:
         return True
     
     return False
@@ -844,31 +878,38 @@ def match_at_root(
         pattern_adj = _build_pattern_adj(pattern)
     
     pattern_n = pattern.num_atoms
+    mol_atoms = mol.atoms  # Local reference for faster access
+    mol_bonds = mol.bonds
+    pattern_atoms = pattern.atoms
+    pattern_bonds = pattern.bonds
     
-    def backtrack(mapping: dict[int, int], pattern_idx: int) -> bool:
+    # Pre-allocate mapping array (faster than dict for small patterns)
+    # Use -1 to indicate unmapped
+    mapping: list[int] = [-1] * pattern_n
+    mapping[0] = atom_idx
+    used: list[bool] = [False] * mol.num_atoms
+    used[atom_idx] = True
+    
+    def backtrack(pattern_idx: int) -> bool:
         if pattern_idx == pattern_n:
             return True
         
-        pattern_atom = pattern.atoms[pattern_idx]
+        pattern_atom = pattern_atoms[pattern_idx]
         
-        # pattern_idx 0 is already matched to atom_idx
-        if pattern_idx == 0:
-            mapping[0] = atom_idx
-            return backtrack(mapping, 1)
-            
+        # Find candidates from mapped neighbors
         candidates_set: set[int] | None = None
         
         for nbr_idx, bond_idx in pattern_adj[pattern_idx]:
-            if nbr_idx in mapping:
-                mol_nbr_idx = mapping[nbr_idx]
-                mol_atom = mol.atoms[mol_nbr_idx]
+            mol_nbr_idx = mapping[nbr_idx]
+            if mol_nbr_idx >= 0:  # Neighbor is mapped
+                mol_atom = mol_atoms[mol_nbr_idx]
                 
                 nbr_candidates: set[int] = set()
                 for mol_bond_idx in mol_atom.bond_indices:
-                    mol_bond = mol.bonds[mol_bond_idx]
+                    mol_bond = mol_bonds[mol_bond_idx]
                     mol_other = mol_bond.other_atom(mol_nbr_idx)
                     
-                    pattern_bond = pattern.bonds[bond_idx]
+                    pattern_bond = pattern_bonds[bond_idx]
                     if _bond_matches(mol_bond, pattern_bond, mol_ring_bonds):
                         nbr_candidates.add(mol_other)
                 
@@ -877,36 +918,30 @@ def match_at_root(
                 else:
                     candidates_set &= nbr_candidates
         
-        candidates: list[int]
         if candidates_set is None:
             # Disconnected component in pattern (unlikely for BRICS but possible)
-            used = set(mapping.values())
-            candidates = [i for i in range(mol.num_atoms) if i not in used]
-        else:
-            candidates = list(candidates_set)
+            candidates_set = {i for i in range(mol.num_atoms) if not used[i]}
         
-        used = set(mapping.values())
-        
-        for mol_idx in candidates:
-            if mol_idx in used:
+        for mol_idx in candidates_set:
+            if used[mol_idx]:
                 continue
             
-            mol_atom = mol.atoms[mol_idx]
+            mol_atom = mol_atoms[mol_idx]
             
             if not _atom_matches(mol_atom, pattern_atom, mol, ring_count, ring_sizes, mol_ring_bonds):
                 continue
             
             bonds_ok = True
             for nbr_idx, bond_idx in pattern_adj[pattern_idx]:
-                if nbr_idx in mapping:
-                    mol_nbr_idx = mapping[nbr_idx]
+                mol_nbr_idx = mapping[nbr_idx]
+                if mol_nbr_idx >= 0:
                     mol_bond = _get_bond_between(mol, mol_idx, mol_nbr_idx)
                     
                     if mol_bond is None:
                         bonds_ok = False
                         break
                     
-                    pattern_bond = pattern.bonds[bond_idx]
+                    pattern_bond = pattern_bonds[bond_idx]
                     if not _bond_matches(mol_bond, pattern_bond, mol_ring_bonds):
                         bonds_ok = False
                         break
@@ -915,13 +950,15 @@ def match_at_root(
                 continue
             
             mapping[pattern_idx] = mol_idx
-            if backtrack(mapping, pattern_idx + 1):
+            used[mol_idx] = True
+            if backtrack(pattern_idx + 1):
                 return True
-            del mapping[pattern_idx]
+            mapping[pattern_idx] = -1
+            used[mol_idx] = False
         
         return False
     
-    return backtrack({}, 0)
+    return backtrack(1)  # Start from 1 since 0 is already mapped
 
 
 def count_matches(mol: "Molecule", pattern: "Molecule") -> int:

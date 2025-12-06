@@ -1,6 +1,10 @@
-# chiralipy
+<p align="center">
+  <img src="resources/icon.png" alt="chiralipy" width="200"/>
+</p>
 
-Chiralipy is a pure Python library for SMILES/SMARTS parsing, canonicalization, and molecular manipulation.
+<p align="center">
+  A pure Python library for SMILES/SMARTS parsing, canonicalization, and molecular manipulation.
+</p>
 
 ## Installation from source
 
@@ -9,8 +13,10 @@ pip install -e .
 ```
 
 ## Installation with pip
-pip install chiralipy
 
+```bash
+pip install chiralipy
+```
 
 ## Quick Start
 
@@ -62,13 +68,14 @@ Comparison against RDKit (C++ implementation):
 
 ```
 Molecule            Atoms  Bonds   RDKit ms  chiralipy ms    Ratio
-----------------------------------------------------------------
-small_ether             5      4     0.37       0.60      1.62x
-medium_drug            15     15     0.88       1.89      2.13x
-drug_like              37     41     3.54       5.05      1.43x
-large_complex          84     98     5.04      13.33      2.64x
+------------------------------------------------------------------
+small_ether             5      4     0.37       0.70        1.88x
+medium_drug            15     15     0.87       2.14        2.45x
+drug_like              37     41     3.46       5.49        1.58x
+large_complex          84     98     5.02      13.88        2.77x
 
-Average: ~2x slower than RDKit
+Average: 2.17x slower than RDKit
+Best case: 1.58x | Worst case: 2.77x
 ```
 
 ## License

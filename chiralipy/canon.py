@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Final
 
 from chiralipy.elements import BondOrder
-from chiralipy.rings import _find_ring_atoms_and_bonds_fast, get_ring_info
+from chiralipy.rings import _find_ring_atoms_and_bonds_fast, get_min_ring_sizes
 
 if TYPE_CHECKING:
     from chiralipy.types import Molecule
@@ -816,7 +816,7 @@ class Canonicalizer:
         n = len(mol.atoms)
         
         ring_atoms, _ = _find_ring_atoms_and_bonds_fast(mol)
-        _, ring_sizes_map = get_ring_info(mol, _ring_atoms=ring_atoms)
+        min_ring_sizes = get_min_ring_sizes(mol, ring_atoms=ring_atoms)
         
         self._atoms = []
         
@@ -847,9 +847,7 @@ class Canonicalizer:
             elif atom.chirality == "@@":
                 chirality_tag = 1  # @@ = CW
             
-            min_ring = 0
-            if atom.idx in ring_sizes_map and ring_sizes_map[atom.idx]:
-                min_ring = min(ring_sizes_map[atom.idx])
+            min_ring = min_ring_sizes.get(atom.idx, 0)
             
             canon_atom = _CanonAtom(
                 atom_idx=atom.idx,
