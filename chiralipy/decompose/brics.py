@@ -22,8 +22,9 @@ from copy import deepcopy
 from typing import Iterator
 
 from chiralipy.parser import parse
-from chiralipy.writer import to_smiles
+from chiralipy.writer import to_smiles, get_output_chirality, count_swaps_to_interconvert
 from chiralipy.types import Atom, Bond, Molecule
+from chiralipy.rings import _find_ring_atoms_and_bonds_fast
 
 
 ENVIRONS: dict[str, str] = {
@@ -97,8 +98,20 @@ for label1, label2, order in BRICS_RULES:
 ATOM_ENVIRONS = ENVIRONS
 
 _COMPILED_PATTERNS: dict[str, Molecule | None] = {}
+_PATTERN_ADJS: dict[str, dict[int, list[tuple[int, int]]]] = {}
 _PATTERNS_BY_SYMBOL: dict[str, list[str]] | None = None
 _PATTERNS_WILDCARD: list[str] | None = None
+
+
+def _build_pattern_adj(pattern: Molecule) -> dict[int, list[tuple[int, int]]]:
+    """Build pattern adjacency list."""
+    adj: dict[int, list[tuple[int, int]]] = {
+        i: [] for i in range(pattern.num_atoms)
+    }
+    for bond in pattern.bonds:
+        adj[bond.atom1_idx].append((bond.atom2_idx, bond.idx))
+        adj[bond.atom2_idx].append((bond.atom1_idx, bond.idx))
+    return adj
 
 
 def _get_pattern(label: str) -> Molecule | None:
@@ -107,7 +120,9 @@ def _get_pattern(label: str) -> Molecule | None:
         smarts = ENVIRONS.get(label, '')
         if smarts:
             try:
-                _COMPILED_PATTERNS[label] = parse(smarts)
+                # Use perceive_aromaticity=False for SMARTS patterns
+                # to preserve explicit aromaticity markers
+                _COMPILED_PATTERNS[label] = parse(smarts, perceive_aromaticity=False)
             except Exception as e:
                 import warnings
                 warnings.warn(f"Failed to parse BRICS pattern {label}: {smarts} - {e}")
@@ -131,6 +146,10 @@ def _ensure_pattern_groups():
         if pattern is None or pattern.num_atoms == 0:
             continue
             
+        # Precompute adjacency
+        if label not in _PATTERN_ADJS:
+            _PATTERN_ADJS[label] = _build_pattern_adj(pattern)
+
         first_atom = pattern.atoms[0]
         if first_atom.is_wildcard or first_atom.symbol == '*':
             _PATTERNS_WILDCARD.append(label)
@@ -169,7 +188,13 @@ def find_brics_bonds(
     """
     from chiralipy.match import RingInfo, match_at_root
 
-    ring_info = RingInfo.from_molecule(mol)
+    # Optimized RingInfo for BRICS (only needs membership, not counts/sizes)
+    # This avoids the expensive get_ring_info() call which enumerates all rings
+    ring_atoms, ring_bonds = _find_ring_atoms_and_bonds_fast(mol)
+    ring_count = {i: 1 if i in ring_atoms else 0 for i in range(mol.num_atoms)}
+    ring_sizes = {i: set() for i in range(mol.num_atoms)}
+    ring_info = RingInfo(ring_count, ring_sizes, ring_bonds)
+
     _ensure_pattern_groups()
     
     env_matches: dict[str, set[int]] = {label: set() for label in ENVIRONS}
@@ -177,13 +202,20 @@ def find_brics_bonds(
     # Iterate over atoms and check relevant patterns
     for atom in mol.atoms:
         symbol = atom.symbol.upper()
-        candidates = _PATTERNS_BY_SYMBOL.get(symbol, [])
-        if _PATTERNS_WILDCARD:
-            candidates = candidates + _PATTERNS_WILDCARD
+        candidates = _PATTERNS_BY_SYMBOL.get(symbol)
+        
+        if candidates:
+            if _PATTERNS_WILDCARD:
+                candidates = candidates + _PATTERNS_WILDCARD
+        elif _PATTERNS_WILDCARD:
+            candidates = _PATTERNS_WILDCARD
+        else:
+            continue
         
         for label in candidates:
             pattern = _get_pattern(label)
-            if pattern and match_at_root(mol, atom.idx, pattern, ring_info):
+            # Pass precomputed adjacency to avoid rebuilding it in match_at_root
+            if pattern and match_at_root(mol, atom.idx, pattern, ring_info, pattern_adj=_PATTERN_ADJS.get(label)):
                 env_matches[label].add(atom.idx)
     
     bonds_found: set[tuple[int, int]] = set()
@@ -251,10 +283,26 @@ def break_brics_bonds(
     if not bonds:
         return deepcopy(mol)
     
+    # Pre-compute the intended output chirality for each chiral atom.
+    # This is the chirality symbol that should appear in the output SMILES.
+    # We compute this BEFORE modifying the molecule structure, because the
+    # canonical traversal order depends on the full molecular structure.
+    # After fragmenting, the traversal order changes, so we store this info
+    # to ensure fragments output the correct chirality.
+    #
+    # Use get_output_chirality which runs the full writer algorithm to
+    # correctly determine output chirality including ring handling.
+    intended_output_chirality = get_output_chirality(mol)
+    
     new_atoms: list[Atom] = []
     new_bonds: list[Bond] = []
     
     for atom in mol.atoms:
+        # Copy atom data and add intended output chirality if computed
+        atom_data = dict(atom.data) if atom.data else {}
+        if atom.idx in intended_output_chirality:
+            atom_data['_intended_output_chirality'] = intended_output_chirality[atom.idx]
+        
         new_atom = Atom(
             idx=atom.idx,
             symbol=atom.symbol,
@@ -264,8 +312,12 @@ def break_brics_bonds(
             isotope=atom.isotope,
             chirality=atom.chirality,
             atom_class=atom.atom_class,
-            data=dict(atom.data) if atom.data else None,
+            data=atom_data if atom_data else None,
+            _was_first_in_component=atom._was_first_in_component,
         )
+        # Copy _smiles_neighbor_bonds for chirality preservation
+        if atom._smiles_neighbor_bonds is not None:
+            new_atom._smiles_neighbor_bonds = list(atom._smiles_neighbor_bonds)
         new_atoms.append(new_atom)
     
     bonds_to_break: dict[tuple[int, int], tuple[str, str]] = {}
@@ -274,7 +326,10 @@ def break_brics_bonds(
         bonds_to_break[key] = (label1, label2) if atom1 < atom2 else (label2, label1)
     
     next_atom_idx = len(new_atoms)
-    dummy_bonds: list[tuple[int, int, str, int]] = []
+    dummy_bonds: list[tuple[int, int, str, int, int]] = []  # parent_idx, dummy_idx, label, order, original_bond_idx
+    
+    # Track mapping from old bond idx -> new bond idx
+    old_bond_to_new: dict[int, int] = {}
     
     for bond in mol.bonds:
         key = (min(bond.atom1_idx, bond.atom2_idx), max(bond.atom1_idx, bond.atom2_idx))
@@ -297,7 +352,8 @@ def break_brics_bonds(
                 atom_class=bond.atom1_idx,  # Store original atom index
             )
             new_atoms.append(dummy1)
-            dummy_bonds.append((bond.atom1_idx, next_atom_idx, label1, bond.order))
+            # Store original bond idx to map _smiles_neighbor_bonds
+            dummy_bonds.append((bond.atom1_idx, next_atom_idx, label1, bond.order, bond.idx))
             next_atom_idx += 1
             
             dummy2 = Atom(
@@ -310,11 +366,12 @@ def break_brics_bonds(
                 atom_class=bond.atom2_idx,  # Store original atom index
             )
             new_atoms.append(dummy2)
-            dummy_bonds.append((bond.atom2_idx, next_atom_idx, label2, bond.order))
+            dummy_bonds.append((bond.atom2_idx, next_atom_idx, label2, bond.order, bond.idx))
             next_atom_idx += 1
         else:
+            new_bond_idx = len(new_bonds)
             new_bond = Bond(
-                idx=len(new_bonds),
+                idx=new_bond_idx,
                 atom1_idx=bond.atom1_idx,
                 atom2_idx=bond.atom2_idx,
                 order=bond.order,
@@ -322,16 +379,26 @@ def break_brics_bonds(
                 stereo=bond.stereo,
             )
             new_bonds.append(new_bond)
+            old_bond_to_new[bond.idx] = new_bond_idx
     
-    for parent_idx, dummy_idx, label, order in dummy_bonds:
+    # Track broken bond -> new dummy bond for each atom
+    # broken_bond_replacement[atom_idx][old_bond_idx] = new_bond_idx
+    broken_bond_replacement: dict[int, dict[int, int]] = {}
+    
+    for parent_idx, dummy_idx, label, order, orig_bond_idx in dummy_bonds:
+        new_bond_idx = len(new_bonds)
         new_bond = Bond(
-            idx=len(new_bonds),
+            idx=new_bond_idx,
             atom1_idx=parent_idx,
             atom2_idx=dummy_idx,
-            order=order,
+            order=1,  # Always use single bond for dummy atoms (BRICS convention)
             is_aromatic=False,
         )
         new_bonds.append(new_bond)
+        
+        if parent_idx not in broken_bond_replacement:
+            broken_bond_replacement[parent_idx] = {}
+        broken_bond_replacement[parent_idx][orig_bond_idx] = new_bond_idx
     
     new_mol = Molecule()
     
@@ -343,6 +410,92 @@ def break_brics_bonds(
         new_mol.bonds.append(bond)
         new_mol.atoms[bond.atom1_idx].bond_indices.append(bond.idx)
         new_mol.atoms[bond.atom2_idx].bond_indices.append(bond.idx)
+    
+    # Update _smiles_neighbor_bonds and potentially invert chirality
+    # 
+    # Approach for chirality during fragmentation:
+    # When a fragment is created, the dummy atom (replacing the broken bond target)
+    # appears at position 0 in the atom list, so its bond to the chiral center
+    # comes FIRST in the neighbor list. This changes the neighbor order relative
+    # to the original molecule, and we need to invert chirality if the permutation
+    # has odd parity.
+    #
+    # Algorithm:
+    # 1. For each broken bond at a chiral atom, determine the position of the 
+    #    broken bond in the original neighbor order
+    # 2. In the fragment, the dummy bond will be at position 0 (first)
+    # 3. Calculate the permutation parity and invert chirality if odd
+    for atom_idx, atom in enumerate(new_mol.atoms):
+        if atom_idx >= len(mol.atoms):
+            continue  # Skip dummy atoms
+        
+        orig_atom = mol.atoms[atom_idx]
+        if orig_atom._smiles_neighbor_bonds is not None:
+            # First pass: collect non-broken bonds in their original order
+            new_neighbor_bonds = []
+            dummy_bonds_to_prepend = []  # Changed: prepend instead of append
+            
+            for old_bond_idx in orig_atom._smiles_neighbor_bonds:
+                # Check if this bond was broken and replaced
+                if atom_idx in broken_bond_replacement and old_bond_idx in broken_bond_replacement[atom_idx]:
+                    # Collect dummy bonds to prepend at the beginning
+                    dummy_bonds_to_prepend.append(broken_bond_replacement[atom_idx][old_bond_idx])
+                elif old_bond_idx in old_bond_to_new:
+                    new_neighbor_bonds.append(old_bond_to_new[old_bond_idx])
+                # Else the bond was removed (shouldn't happen for stereochem atoms)
+            
+            # Prepend dummy bonds at the beginning (matching fragment neighbor order)
+            new_neighbor_bonds = dummy_bonds_to_prepend + new_neighbor_bonds
+            
+            if new_neighbor_bonds:
+                atom._smiles_neighbor_bonds = new_neighbor_bonds
+        
+        # Handle chirality inversion
+        # Only process atoms with tetrahedral chirality
+        if orig_atom.chirality in ('@', '@@') and atom_idx in broken_bond_replacement:
+            # In fragments, the dummy atom is at position 0, so its bond
+            # comes FIRST in the chiral atom's neighbor list. The original neighbor
+            # that was replaced is now represented by the dummy at the front.
+            #
+            # Original: [N, C(broken), C, C] at positions [0, 1, 2, 3]
+            # Fragment: [*, N, C, C] where * replaces C(broken) but is at position 0
+            #
+            # The permutation moves the element from its original position to position 0,
+            # shifting other elements. We need to count the swaps.
+            
+            if orig_atom._smiles_neighbor_bonds is not None:
+                original_bond_order = list(orig_atom._smiles_neighbor_bonds)
+            else:
+                original_bond_order = list(orig_atom.bond_indices)
+            
+            broken_bond_idxs = set(broken_bond_replacement[atom_idx].keys())
+            
+            # Find the position(s) of broken bonds in original order
+            broken_positions = []
+            non_broken_positions = []
+            for pos, bond_idx in enumerate(original_bond_order):
+                if bond_idx in broken_bond_idxs:
+                    broken_positions.append(pos)
+                else:
+                    non_broken_positions.append(pos)
+            
+            # New order: [broken positions (now at front)] + [non-broken positions]
+            # This represents [*, ...remaining...] in the fragment
+            new_position_order = broken_positions + non_broken_positions
+            
+            # Count swaps from new_position_order to [0, 1, 2, 3, ...]
+            if len(new_position_order) >= 3:
+                original_position_order = list(range(len(original_bond_order)))
+                try:
+                    n_swaps = count_swaps_to_interconvert(new_position_order, original_position_order)
+                    if n_swaps % 2 == 1:
+                        # Invert chirality: @ <-> @@
+                        if atom.chirality == '@':
+                            atom.chirality = '@@'
+                        elif atom.chirality == '@@':
+                            atom.chirality = '@'
+                except ValueError:
+                    pass  # Lists don't contain same elements - shouldn't happen
     
     return new_mol
 
@@ -401,6 +554,7 @@ def _get_fragments(mol: Molecule) -> list[Molecule]:
         
         frag = Molecule()
         
+        # First pass: create atoms
         for old_idx in sorted(component):
             old_atom = mol.atoms[old_idx]
             new_atom = Atom(
@@ -413,10 +567,13 @@ def _get_fragments(mol: Molecule) -> list[Molecule]:
                 chirality=old_atom.chirality,
                 atom_class=old_atom.atom_class,
                 data=dict(old_atom.data) if old_atom.data else None,
+                _was_first_in_component=old_atom._was_first_in_component,
             )
             new_atom.bond_indices = []
             frag.atoms.append(new_atom)
         
+        # Second pass: create bonds and track old->new bond mapping
+        old_bond_to_new: dict[int, int] = {}
         added_bonds: set[int] = set()
         for old_idx in component:
             old_atom = mol.atoms[old_idx]
@@ -426,8 +583,9 @@ def _get_fragments(mol: Molecule) -> list[Molecule]:
                 
                 bond = mol.bonds[bond_idx]
                 if bond.atom1_idx in component and bond.atom2_idx in component:
+                    new_bond_idx = len(frag.bonds)
                     new_bond = Bond(
-                        idx=len(frag.bonds),
+                        idx=new_bond_idx,
                         atom1_idx=old_to_new[bond.atom1_idx],
                         atom2_idx=old_to_new[bond.atom2_idx],
                         order=bond.order,
@@ -437,7 +595,40 @@ def _get_fragments(mol: Molecule) -> list[Molecule]:
                     frag.bonds.append(new_bond)
                     frag.atoms[new_bond.atom1_idx].bond_indices.append(new_bond.idx)
                     frag.atoms[new_bond.atom2_idx].bond_indices.append(new_bond.idx)
+                    old_bond_to_new[bond_idx] = new_bond_idx
                     added_bonds.add(bond_idx)
+        
+        # Third pass: Remap _smiles_neighbor_bonds
+        for old_idx in component:
+            old_atom = mol.atoms[old_idx]
+            new_atom = frag.atoms[old_to_new[old_idx]]
+            
+            if old_atom._smiles_neighbor_bonds:
+                new_neighbors = []
+                for bond_idx in old_atom._smiles_neighbor_bonds:
+                    if bond_idx in old_bond_to_new:
+                        new_neighbors.append(old_bond_to_new[bond_idx])
+                new_atom._smiles_neighbor_bonds = new_neighbors
+        
+        # Fourth pass: Reorder bond_indices for chiral atoms
+        # Place bonds to dummy atoms FIRST in the neighbor list. Since we use
+        # bond_indices as the reference for chirality inversion calculations (when
+        # _smiles_neighbor_bonds is None), we must match this order.
+        for new_atom in frag.atoms:
+            if new_atom.chirality in ('@', '@@'):
+                # Separate bonds to dummy atoms from bonds to real atoms
+                dummy_bonds = []
+                real_bonds = []
+                for bond_idx in new_atom.bond_indices:
+                    bond = frag.bonds[bond_idx]
+                    neighbor_idx = bond.other_atom(new_atom.idx)
+                    neighbor = frag.atoms[neighbor_idx]
+                    if neighbor.symbol == '*':
+                        dummy_bonds.append(bond_idx)
+                    else:
+                        real_bonds.append(bond_idx)
+                # Put dummy bonds first, then real bonds
+                new_atom.bond_indices = dummy_bonds + real_bonds
         
         fragments.append(frag)
     
@@ -466,11 +657,15 @@ def _get_stem_atom_indices(mol: Molecule) -> set[int]:
 
 
 def _strip_dummy_atoms_and_mark_stems(mol: Molecule) -> Molecule:
-    """Remove dummy atoms (*) from a molecule and mark stem atoms in data dict.
+    r"""Remove dummy atoms (*) from a molecule and mark stem atoms in data dict.
     
     The bonds to dummy atoms are removed, leaving the attachment point atoms
     with their original connectivity (minus the dummy). Stem atoms are marked
     with data['is_stem']=True so they can be identified after canonicalization.
+    
+    Bond stereo markers (/ and \\) that are no longer valid after dummy removal
+    are also cleared - this happens when the double bond they referred to has
+    been cleaved.
     
     Args:
         mol: Molecule to strip dummy atoms from.
@@ -498,6 +693,31 @@ def _strip_dummy_atoms_and_mark_stems(mol: Molecule) -> Molecule:
     
     real_atoms_set = set(real_atom_indices)
     
+    # Find atoms that were bonded to dummy atoms (cleaved bond endpoints)
+    # These atoms may have invalid stereo on their remaining bonds
+    # Also count how many bonds each atom loses to dummies (for H addition)
+    atoms_with_cleaved_bonds: set[int] = set()
+    bonds_lost_to_dummies: dict[int, int] = {}  # atom_idx -> count of bonds lost
+    for bond in mol.bonds:
+        a1, a2 = bond.atom1_idx, bond.atom2_idx
+        a1_is_dummy = mol.atoms[a1].symbol == '*'
+        a2_is_dummy = mol.atoms[a2].symbol == '*'
+        if a1_is_dummy and not a2_is_dummy:
+            atoms_with_cleaved_bonds.add(a2)
+            bonds_lost_to_dummies[a2] = bonds_lost_to_dummies.get(a2, 0) + bond.order
+        elif a2_is_dummy and not a1_is_dummy:
+            atoms_with_cleaved_bonds.add(a1)
+            bonds_lost_to_dummies[a1] = bonds_lost_to_dummies.get(a1, 0) + bond.order
+    
+    # Calculate remaining bond order for each real atom (bonds to other real atoms)
+    remaining_bond_order: dict[int, int] = {i: 0 for i in real_atom_indices}
+    for bond in mol.bonds:
+        a1, a2 = bond.atom1_idx, bond.atom2_idx
+        if a1 in real_atoms_set and a2 in real_atoms_set:
+            order = 1.5 if bond.is_aromatic else bond.order
+            remaining_bond_order[a1] += order
+            remaining_bond_order[a2] += order
+    
     # Build new molecule
     new_mol = Molecule()
     
@@ -508,14 +728,39 @@ def _strip_dummy_atoms_and_mark_stems(mol: Molecule) -> Molecule:
         new_data = dict(old_atom.data) if old_atom.data else {}
         if is_stem:
             new_data['is_stem'] = True
+        
+        # Clear chirality if this atom was bonded to a dummy
+        # (losing a substituent invalidates tetrahedral chirality)
+        chirality = old_atom.chirality
+        explicit_hydrogens = old_atom.explicit_hydrogens
+        if old_idx in atoms_with_cleaved_bonds:
+            chirality = None
+            
+            from chiralipy.elements import get_default_valence, get_atomic_number
+            atomic_num = get_atomic_number(old_atom.symbol)
+            default_val = get_default_valence(atomic_num)
+            remaining_bonds = int(round(remaining_bond_order.get(old_idx, 0)))
+            
+            if default_val is not None and remaining_bonds > default_val:
+                # Hypervalent atom: need explicit H to show the actual valence
+                # The atom had more bonds than its default valence, so we need to
+                # explicitly show H to indicate its true valence
+                lost_bonds = bonds_lost_to_dummies.get(old_idx, 0)
+                explicit_hydrogens += lost_bonds
+            else:
+                # Normal atom: clear explicit H that was only used for chirality
+                # Implicit H will be calculated correctly by the writer
+                if explicit_hydrogens == 1 and chirality is None:
+                    explicit_hydrogens = 0
+        
         new_atom = Atom(
             idx=old_to_new[old_idx],
             symbol=old_atom.symbol,
             charge=old_atom.charge,
-            explicit_hydrogens=old_atom.explicit_hydrogens,
+            explicit_hydrogens=explicit_hydrogens,
             is_aromatic=old_atom.is_aromatic,
             isotope=old_atom.isotope,
-            chirality=old_atom.chirality,
+            chirality=chirality,
             atom_class=old_atom.atom_class,
             data=new_data if new_data else None,
         )
@@ -528,13 +773,20 @@ def _strip_dummy_atoms_and_mark_stems(mol: Molecule) -> Molecule:
         if bond.atom1_idx in real_atoms_set and bond.atom2_idx in real_atoms_set:
             bond_key = (min(bond.atom1_idx, bond.atom2_idx), max(bond.atom1_idx, bond.atom2_idx))
             if bond_key not in added_bonds:
+                # Clear stereo if either endpoint was bonded to a dummy
+                # (indicating the double bond was cleaved)
+                stereo = bond.stereo
+                if stereo and (bond.atom1_idx in atoms_with_cleaved_bonds or 
+                               bond.atom2_idx in atoms_with_cleaved_bonds):
+                    stereo = None
+                
                 new_bond = Bond(
                     idx=len(new_mol.bonds),
                     atom1_idx=old_to_new[bond.atom1_idx],
                     atom2_idx=old_to_new[bond.atom2_idx],
                     order=bond.order,
                     is_aromatic=bond.is_aromatic,
-                    stereo=bond.stereo,
+                    stereo=stereo,
                 )
                 new_mol.bonds.append(new_bond)
                 new_mol.atoms[new_bond.atom1_idx].bond_indices.append(new_bond.idx)
@@ -544,7 +796,10 @@ def _strip_dummy_atoms_and_mark_stems(mol: Molecule) -> Molecule:
     return new_mol
 
 
-def _to_smiles_with_stems(mol: Molecule) -> tuple[str, set[int]]:
+def _to_smiles_with_stems(
+    mol: Molecule,
+    include_stereo: bool = True,
+) -> tuple[str, set[int]]:
     """Convert molecule to canonical SMILES and extract stem indices.
     
     Stem atoms must be marked with data['is_stem']=True (via _strip_dummy_atoms_and_mark_stems).
@@ -552,6 +807,7 @@ def _to_smiles_with_stems(mol: Molecule) -> tuple[str, set[int]]:
     
     Args:
         mol: Molecule with stem atoms marked via data['is_stem'].
+        include_stereo: If True, include bond stereochemistry (/, \\) in SMILES.
     
     Returns:
         Tuple of (canonical_smiles, set of stem indices in the canonical SMILES).
@@ -562,7 +818,7 @@ def _to_smiles_with_stems(mol: Molecule) -> tuple[str, set[int]]:
     ranks = canonical_ranks(mol)
     
     # Generate canonical SMILES
-    smiles = to_smiles(mol, ranks)
+    smiles = to_smiles(mol, ranks, include_stereo=include_stereo)
     
     # Parse the canonical SMILES to get atoms in canonical order
     parsed = parse(smiles)
@@ -595,20 +851,22 @@ def _to_smiles_with_stems(mol: Molecule) -> tuple[str, set[int]]:
 
 
 def brics_decompose(
-    mol: Molecule,
+    mol: Molecule | str,
     min_fragment_size: int = 1,
     keep_non_leaf_nodes: bool = False,
     single_pass: bool = False,
     return_mols: bool = False,
     return_stems: bool = False,
     bond_orders: set[int] | None = None,
+    include_atom_class: bool = False,
+    include_stereo: bool = True,
 ) -> set[str] | list[Molecule] | dict[str, set[int]] | list[tuple[Molecule, set[int]]]:
     """Perform BRICS decomposition on a molecule.
     
     Identifies and breaks all BRICS bonds in the molecule.
     
     Args:
-        mol: Molecule to decompose.
+        mol: Molecule to decompose, or SMILES string.
         min_fragment_size: Minimum number of heavy atoms in a fragment.
         keep_non_leaf_nodes: If True, include the original molecule in output.
         single_pass: If True, only break bonds once. If False (default),
@@ -624,6 +882,10 @@ def brics_decompose(
             Use {1} for single bonds only, {2} for double bonds only.
             BRICS primarily cleaves single bonds; double bond cleavage is rare
             (only L7a-L7b olefin C=C bonds).
+        include_atom_class: If True, include atom class annotations (:N) in SMILES.
+            Default is False for cleaner output.
+        include_stereo: If True (default), include bond stereochemistry (/, \\) in SMILES.
+            Set to False to exclude stereochemistry markers.
     
     Returns:
         - set[str]: SMILES strings (default)
@@ -641,7 +903,11 @@ def brics_decompose(
         >>> frags_single = brics_decompose(mol, bond_orders={1})
         >>> # Only cleave single bonds
     """
-    mol_smi = to_smiles(mol)
+    # Handle string input
+    if isinstance(mol, str):
+        mol = parse(mol)
+    
+    mol_smi = to_smiles(mol, include_atom_class=include_atom_class, include_stereo=include_stereo)
     
     # Find all cleavable bonds
     bonds = list(find_brics_bonds(mol, bond_orders=bond_orders))
@@ -686,10 +952,10 @@ def brics_decompose(
             result_dict: dict[str, set[int]] = {}
             for f in all_frags:
                 stripped = _strip_dummy_atoms_and_mark_stems(f)
-                smiles, stems = _to_smiles_with_stems(stripped)
+                smiles, stems = _to_smiles_with_stems(stripped, include_stereo=include_stereo)
                 result_dict[smiles] = stems
             return result_dict
-        return {to_smiles(f) for f in all_frags}
+        return {to_smiles(f, include_atom_class=include_atom_class, include_stereo=include_stereo) for f in all_frags}
     
     # Recursive decomposition: continue until no more bonds can be broken
     final_fragments: list[Molecule] = []
@@ -730,7 +996,7 @@ def brics_decompose(
         result_dict = {}
         for f in all_fragments:
             stripped = _strip_dummy_atoms_and_mark_stems(f)
-            smiles, stems = _to_smiles_with_stems(stripped)
+            smiles, stems = _to_smiles_with_stems(stripped, include_stereo=include_stereo)
             result_dict[smiles] = stems
         return result_dict
-    return {to_smiles(f) for f in all_fragments}
+    return {to_smiles(f, include_atom_class=include_atom_class, include_stereo=include_stereo) for f in all_fragments}

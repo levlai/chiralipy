@@ -59,6 +59,7 @@ class RingInfo:
 
 # Cache for parsed recursive SMARTS patterns
 _RECURSIVE_PATTERN_CACHE: dict[str, "Molecule"] = {}
+_RECURSIVE_PATTERN_ADJ_CACHE: dict[str, dict[int, list[tuple[int, int]]]] = {}
 
 
 def _build_pattern_adj(pattern: "Molecule") -> dict[int, list[tuple[int, int]]]:
@@ -99,17 +100,19 @@ def _matches_recursive_smarts(
     from chiralipy.parser import parse
     
     # Get or parse the recursive pattern (cached)
+    # Use perceive_aromaticity=False because SMARTS patterns use lowercase
+    # letters to explicitly indicate aromaticity requirements
     if recursive_smarts not in _RECURSIVE_PATTERN_CACHE:
         try:
-            pattern = parse(f"[{recursive_smarts}]")
+            pattern = parse(f"[{recursive_smarts}]", perceive_aromaticity=False)
             # If pattern has just one atom, we might need to re-parse as regular SMARTS
             if pattern.num_atoms == 1:
-                pattern = parse(recursive_smarts)
+                pattern = parse(recursive_smarts, perceive_aromaticity=False)
             _RECURSIVE_PATTERN_CACHE[recursive_smarts] = pattern
         except Exception:
             # If parsing fails, try wrapping differently
             try:
-                pattern = parse(recursive_smarts)
+                pattern = parse(recursive_smarts, perceive_aromaticity=False)
                 _RECURSIVE_PATTERN_CACHE[recursive_smarts] = pattern
             except Exception:
                 return False
@@ -142,6 +145,14 @@ def _matches_recursive_smarts(
         if pattern_atom.degree_query != -1 and degree != pattern_atom.degree_query:
             return False
     
+    # Check negated degree [!D1]
+    if pattern_atom.negated_degree_query is not None:
+        degree = len(mol_atom.bond_indices)
+        if pattern_atom.negated_degree_query == -1:
+            return False  # !D means "not any degree" - always fails
+        elif degree == pattern_atom.negated_degree_query:
+            return False
+    
     # Check ring membership
     if pattern_atom.ring_count is not None:
         atom_ring_count = ring_count.get(mol_atom.idx, 0)
@@ -158,8 +169,10 @@ def _matches_recursive_smarts(
     if pattern.num_atoms == 1:
         return True
     
-    # Build pattern adjacency
-    pattern_adj = _build_pattern_adj(pattern)
+    # Build pattern adjacency (cached)
+    if recursive_smarts not in _RECURSIVE_PATTERN_ADJ_CACHE:
+        _RECURSIVE_PATTERN_ADJ_CACHE[recursive_smarts] = _build_pattern_adj(pattern)
+    pattern_adj = _RECURSIVE_PATTERN_ADJ_CACHE[recursive_smarts]
     
     # Initialize ring bonds if not provided
     if mol_ring_bonds is None:
@@ -193,7 +206,7 @@ def _matches_recursive_smarts(
                     
                     # Check bond matches
                     pattern_bond = pattern.bonds[bond_idx]
-                    if _bond_matches_internal(mol_bond, pattern_bond, mol_ring_bonds):
+                    if _bond_matches(mol_bond, pattern_bond, mol_ring_bonds):
                         if mol_other not in mapping.values():
                             candidates.add(mol_other)
         
@@ -217,7 +230,7 @@ def _matches_recursive_smarts(
                         ok = False
                         break
                     pattern_bond = pattern.bonds[bond_idx]
-                    if not _bond_matches_internal(mol_bond, pattern_bond, mol_ring_bonds):
+                    if not _bond_matches(mol_bond, pattern_bond, mol_ring_bonds):
                         ok = False
                         break
             
@@ -237,13 +250,26 @@ def _matches_recursive_smarts(
 def _atom_matches_basic(
     mol_atom: "Atom",
     pattern_atom: "Atom",
-    mol: "Molecule",
+    _mol: "Molecule",
     ring_count: dict[int, int],
-    ring_sizes: dict[int, set[int]],
+    _ring_sizes: dict[int, set[int]],
 ) -> bool:
     """Basic atom matching without recursive SMARTS handling."""
-    # Check atom list
-    if pattern_atom.atom_list:
+    # Negated atomic number list [!#6;!#16;!#0;!#1] - atom must NOT be any of these
+    if pattern_atom.negated_atomic_number_list:
+        if mol_atom.atomic_number in pattern_atom.negated_atomic_number_list:
+            return False
+    
+    # Atomic number list [#6] or [#0,#6,#7] - matches by atomic number, ignores aromaticity
+    if pattern_atom.atomic_number_list:
+        if mol_atom.atomic_number not in pattern_atom.atomic_number_list:
+            return False
+        # When matching by atomic number, skip symbol and aromaticity checks
+    elif pattern_atom.negated_atomic_number_list:
+        # When matching by negated atomic numbers only, skip symbol check
+        pass
+    elif pattern_atom.atom_list:
+        # Check atom list
         mol_symbol = mol_atom.symbol.upper()
         pattern_symbols = [s.upper() for s in pattern_atom.atom_list]
         if pattern_atom.atom_list_negated:
@@ -259,13 +285,14 @@ def _atom_matches_basic(
         if mol_atom.symbol.upper() != pattern_atom.symbol.upper():
             return False
     
-    # Aromaticity
-    if pattern_atom.is_aromatic and not mol_atom.is_aromatic:
-        return False
-    if not pattern_atom.is_aromatic and not pattern_atom.is_wildcard:
-        if pattern_atom.symbol and pattern_atom.symbol[0].isupper():
-            if mol_atom.is_aromatic:
-                return False
+    # Aromaticity - skip if matching by atomic number list or negated atomic number list
+    if not pattern_atom.atomic_number_list and not pattern_atom.negated_atomic_number_list:
+        if pattern_atom.is_aromatic and not mol_atom.is_aromatic:
+            return False
+        if not pattern_atom.is_aromatic and not pattern_atom.is_wildcard:
+            if pattern_atom.symbol and pattern_atom.symbol[0].isupper():
+                if mol_atom.is_aromatic:
+                    return False
     
     # Ring membership
     if pattern_atom.ring_count is not None:
@@ -279,53 +306,28 @@ def _atom_matches_basic(
         elif atom_ring_count != pattern_atom.ring_count:
             return False
     
-    # Degree
-    if pattern_atom.degree_query is not None:
-        degree = len(mol_atom.bond_indices)
+    # Degree - if degree_query_list is present, use it (OR'd degrees like [D2,D3])
+    # Otherwise check degree_query
+    degree = len(mol_atom.bond_indices)
+    if pattern_atom.degree_query_list:
+        if degree not in pattern_atom.degree_query_list:
+            return False
+    elif pattern_atom.degree_query is not None:
         if pattern_atom.degree_query == -1:
             if degree == 0:
                 return False
         elif degree != pattern_atom.degree_query:
             return False
     
+    # Negated degree query [!D1] - atom must NOT have this degree
+    if pattern_atom.negated_degree_query is not None:
+        if pattern_atom.negated_degree_query == -1:
+            # !D means "not any degree" - this would always fail
+            return False
+        elif degree == pattern_atom.negated_degree_query:
+            return False
+    
     return True
-
-
-def _bond_matches_internal(
-    mol_bond: "Bond",
-    pattern_bond: "Bond",
-    mol_ring_bonds: set[tuple[int, int]] | None = None,
-) -> bool:
-    """Internal bond matching for recursive SMARTS."""
-    # Check ring bond constraint
-    if mol_ring_bonds is not None:
-        bond_key = (min(mol_bond.atom1_idx, mol_bond.atom2_idx),
-                   max(mol_bond.atom1_idx, mol_bond.atom2_idx))
-        is_ring = bond_key in mol_ring_bonds
-        
-        # Check !@ constraint (must NOT be ring bond)
-        if pattern_bond.is_not_ring_bond:
-            if is_ring:
-                return False
-        
-        # Check @ constraint (must be ring bond)
-        if pattern_bond.is_ring_bond:
-            if not is_ring:
-                return False
-    
-    if pattern_bond.is_any:
-        return True
-    
-    if pattern_bond.is_aromatic:
-        return mol_bond.is_aromatic
-    
-    if pattern_bond.order == mol_bond.order:
-        return True
-    
-    if pattern_bond.order == 1 and mol_bond.is_aromatic:
-        return True
-    
-    return False
 
 
 def _get_bond_between(mol: "Molecule", atom1_idx: int, atom2_idx: int) -> "Bond | None":
@@ -347,6 +349,10 @@ def _atom_matches(
 ) -> bool:
     """Check if a molecule atom matches a SMARTS pattern atom.
     
+    This is the full atom matching function that handles recursive SMARTS
+    and all advanced SMARTS features. For simple matching without recursive
+    SMARTS, use _atom_matches_basic.
+    
     Args:
         mol_atom: Atom from the molecule being searched.
         pattern_atom: Atom from the SMARTS pattern.
@@ -358,14 +364,15 @@ def _atom_matches(
     Returns:
         True if the molecule atom satisfies all pattern constraints.
     """
+    # Use basic matching for common atom properties
+    if not _atom_matches_basic(mol_atom, pattern_atom, mol, ring_count, ring_sizes):
+        return False
+
     # Handle recursive SMARTS $(...)
     if pattern_atom.is_recursive and pattern_atom.recursive_smarts:
-        # Parse the recursive pattern and check if this atom matches
-        # as the first atom in that pattern
         if not _matches_recursive_smarts(mol, mol_atom.idx, pattern_atom.recursive_smarts,
                                          ring_count, ring_sizes, mol_ring_bonds):
             return False
-        # If there are other constraints on the atom, continue checking them
         # If it's just a recursive SMARTS with no other constraints, we're done
         if pattern_atom.symbol == '*' and not pattern_atom.atom_list:
             return True
@@ -373,44 +380,11 @@ def _atom_matches(
     # Handle negated recursive SMARTS !$(...)
     if pattern_atom.negated_recursive_smarts:
         for neg_smarts in pattern_atom.negated_recursive_smarts:
-            # If the atom DOES match the negated pattern, then it fails
             if _matches_recursive_smarts(mol, mol_atom.idx, neg_smarts,
                                          ring_count, ring_sizes, mol_ring_bonds):
                 return False
     
-    # Wildcard matches anything
-    if pattern_atom.is_wildcard and not pattern_atom.atom_list:
-        # But still check SMARTS queries if present
-        pass
-    elif pattern_atom.atom_list:
-        # Atom list: check if mol_atom symbol is in list
-        mol_symbol = mol_atom.symbol.upper()
-        pattern_symbols = [s.upper() for s in pattern_atom.atom_list]
-        
-        if pattern_atom.atom_list_negated:
-            if mol_symbol in pattern_symbols:
-                return False
-        else:
-            if mol_symbol not in pattern_symbols:
-                return False
-    elif pattern_atom.atom_list_negated:
-        # Negated single atom [!C]
-        if mol_atom.symbol.upper() == pattern_atom.symbol.upper():
-            return False
-    elif not pattern_atom.is_wildcard:
-        # Regular element match
-        if mol_atom.symbol.upper() != pattern_atom.symbol.upper():
-            return False
-    
-    # Aromaticity
-    if pattern_atom.is_aromatic and not mol_atom.is_aromatic:
-        return False
-    if not pattern_atom.is_aromatic and not pattern_atom.is_wildcard:
-        # Non-aromatic pattern atom - check if mol atom is also non-aromatic
-        # Only enforce if pattern explicitly uses uppercase
-        if pattern_atom.symbol and pattern_atom.symbol[0].isupper():
-            if mol_atom.is_aromatic:
-                return False
+    # Additional checks not in _atom_matches_basic:
     
     # Charge
     if pattern_atom.charge != 0:
@@ -422,31 +396,13 @@ def _atom_matches(
         if mol_atom.charge != pattern_atom.charge_query:
             return False
     
-    # Ring membership (R, R0, R1, R2, ...)
-    if pattern_atom.ring_count is not None:
-        atom_ring_count = ring_count.get(mol_atom.idx, 0)
-        if pattern_atom.ring_count == -1:
-            # [R] means in any ring
-            if atom_ring_count == 0:
-                return False
-        elif pattern_atom.ring_count == 0:
-            # [R0] means not in any ring
-            if atom_ring_count > 0:
-                return False
-        else:
-            # [R2] means in exactly 2 rings
-            if atom_ring_count != pattern_atom.ring_count:
-                return False
-    
     # Ring size (r5, r6, ...)
     if pattern_atom.ring_size is not None:
         atom_ring_sizes = ring_sizes.get(mol_atom.idx, set())
         if pattern_atom.ring_size == -1:
-            # [r] means in any ring (same as R)
             if not atom_ring_sizes:
                 return False
         else:
-            # [r6] means in a 6-membered ring
             if pattern_atom.ring_size not in atom_ring_sizes:
                 return False
     
@@ -458,20 +414,8 @@ def _atom_matches(
             _mol_total_h = mol_atom.total_hydrogens(mol)
         return _mol_total_h
     
-    # Degree (D, D2, D3, ...) - number of explicit connections (not H)
-    if pattern_atom.degree_query is not None:
-        degree = len(mol_atom.bond_indices)
-        if pattern_atom.degree_query == -1:
-            # [D] means any degree > 0
-            if degree == 0:
-                return False
-        else:
-            if degree != pattern_atom.degree_query:
-                return False
-    
     # Connectivity (X, X2, ...) - total connections including implicit H
     if pattern_atom.connectivity_query is not None:
-        # Connectivity = explicit bonds + total hydrogens
         explicit_bonds = len(mol_atom.bond_indices)
         connectivity = explicit_bonds + get_mol_total_h()
         
@@ -484,15 +428,14 @@ def _atom_matches(
     
     # Valence (v, v4, ...)
     if pattern_atom.valence_query is not None:
-        # Valence = sum of bond orders + total H
         valence = 0
         for bond_idx in mol_atom.bond_indices:
             bond = mol.bonds[bond_idx]
             if bond.is_aromatic:
-                valence += 1.5  # Aromatic bonds count as 1.5
+                valence += 1.5
             else:
                 valence += bond.order
-        valence = int(valence + 0.5)  # Round
+        valence = int(valence + 0.5)
         valence += get_mol_total_h()
         
         if pattern_atom.valence_query == -1:
@@ -502,7 +445,7 @@ def _atom_matches(
             if valence != pattern_atom.valence_query:
                 return False
     
-    # Hydrogen count (H, H2, ...) - matches total hydrogens, not just explicit
+    # Hydrogen count (H, H2, ...) - matches total hydrogens
     if pattern_atom.explicit_hydrogens > 0:
         if get_mol_total_h() != pattern_atom.explicit_hydrogens:
             return False
@@ -548,6 +491,19 @@ def _bond_matches(
     
     # Any bond (~) matches everything
     if pattern_bond.is_any:
+        return True
+    
+    # Handle negated bonds (!-, !=, !#)
+    if pattern_bond.is_negated:
+        # Negated bond: must NOT match the specified order
+        if pattern_bond.is_aromatic:
+            return not mol_bond.is_aromatic
+        # For negated single bond !-, any non-single bond matches
+        # (including double, triple, aromatic)
+        if mol_bond.order == pattern_bond.order:
+            return False
+        if pattern_bond.order == 1 and mol_bond.is_aromatic:
+            return False  # Aromatic bonds are considered single-ish for matching
         return True
     
     # Aromatic bond

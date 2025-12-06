@@ -232,54 +232,91 @@ def kekulize(mol: Molecule, clear_aromatic_flags: bool = True, in_place: bool = 
     # Now find a perfect matching using the Hopcroft-Karp-like approach
     # We need to match atoms that need double bonds
     
-    atoms_needing = [idx for idx in aromatic_atoms if needs_double.get(idx, False)]
-    
-    # Use backtracking to find a valid assignment
-    # Each atom needing a double bond must be matched with exactly one neighbor
-    
-    matching: dict[int, int] = {}  # atom_idx -> matched_atom_idx
-    double_bonds: set[int] = set()
-    
-    def try_match(atoms_left: list[int]) -> bool:
-        """Try to find a perfect matching for remaining atoms."""
-        if not atoms_left:
-            return True
+    def try_kekulize_with_config(needs_config: dict[int, bool]) -> tuple[bool, set[int]]:
+        """Try to find a valid kekulization with given needs_double configuration.
         
-        atom_idx = atoms_left[0]
+        Returns:
+            Tuple of (success, double_bonds set)
+        """
+        atoms_needing = [idx for idx in aromatic_atoms if needs_config.get(idx, False)]
         
-        # This atom needs to be matched with one neighbor
-        for nbr_idx, bond_idx in aromatic_adj[atom_idx]:
-            # Can only match with a neighbor that also needs matching
-            # and isn't already matched
-            if nbr_idx in matching:
-                continue  # Neighbor already matched
-            
-            if not needs_double.get(nbr_idx, False):
-                continue  # Neighbor doesn't need a double bond
-            
-            # Try this matching
-            matching[atom_idx] = nbr_idx
-            matching[nbr_idx] = atom_idx
-            double_bonds.add(bond_idx)
-            
-            # Recurse with remaining atoms (excluding matched ones)
-            remaining = [a for a in atoms_left[1:] if a not in matching]
-            if try_match(remaining):
+        # Use backtracking to find a valid assignment
+        # Each atom needing a double bond must be matched with exactly one neighbor
+        
+        matching: dict[int, int] = {}  # atom_idx -> matched_atom_idx
+        result_double_bonds: set[int] = set()
+        
+        def try_match(atoms_left: list[int]) -> bool:
+            """Try to find a perfect matching for remaining atoms."""
+            if not atoms_left:
                 return True
             
-            # Backtrack
-            del matching[atom_idx]
-            del matching[nbr_idx]
-            double_bonds.discard(bond_idx)
+            atom_idx = atoms_left[0]
+            
+            # This atom needs to be matched with one neighbor
+            for nbr_idx, bond_idx in aromatic_adj[atom_idx]:
+                # Can only match with a neighbor that also needs matching
+                # and isn't already matched
+                if nbr_idx in matching:
+                    continue  # Neighbor already matched
+                
+                if not needs_config.get(nbr_idx, False):
+                    continue  # Neighbor doesn't need a double bond
+                
+                # Try this matching
+                matching[atom_idx] = nbr_idx
+                matching[nbr_idx] = atom_idx
+                result_double_bonds.add(bond_idx)
+                
+                # Recurse with remaining atoms (excluding matched ones)
+                remaining = [a for a in atoms_left[1:] if a not in matching]
+                if try_match(remaining):
+                    return True
+                
+                # Backtrack
+                del matching[atom_idx]
+                del matching[nbr_idx]
+                result_double_bonds.discard(bond_idx)
+            
+            return False
         
-        return False
+        # Sort by degree (most constrained first)
+        atoms_needing.sort(key=lambda x: len(aromatic_adj[x]))
+        
+        if not atoms_needing:
+            return True, set()
+        
+        if try_match(atoms_needing):
+            return True, result_double_bonds
+        return False, set()
     
-    # Sort by degree (most constrained first)
-    atoms_needing.sort(key=lambda x: len(aromatic_adj[x]))
+    # First try with the initial needs_double assignments
+    success, double_bonds = try_kekulize_with_config(needs_double)
     
-    if atoms_needing:
-        if not try_match(atoms_needing):
-            raise KekulizationError("Cannot kekulize molecule - no valid assignment found")
+    if not success and ambiguous_atoms:
+        # Try flipping ambiguous atoms to find a valid assignment
+        # The ambiguous atoms can go either way (need double or not)
+        from itertools import combinations
+        
+        ambiguous_list = list(ambiguous_atoms)
+        
+        # Try flipping different subsets of ambiguous atoms
+        # Start by flipping each one individually, then pairs, etc.
+        for num_flips in range(1, len(ambiguous_list) + 1):
+            for atoms_to_flip in combinations(ambiguous_list, num_flips):
+                # Create modified needs_double config
+                modified_needs = needs_double.copy()
+                for atom_idx in atoms_to_flip:
+                    modified_needs[atom_idx] = not modified_needs[atom_idx]
+                
+                success, double_bonds = try_kekulize_with_config(modified_needs)
+                if success:
+                    break
+            if success:
+                break
+    
+    if not success:
+        raise KekulizationError("Cannot kekulize molecule - no valid assignment found")
     
     # Apply the assignment
     for bond_idx in aromatic_bonds:

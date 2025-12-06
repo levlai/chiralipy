@@ -116,7 +116,13 @@ def _find_ring_atoms_and_bonds_fast(mol: "Molecule") -> tuple[set[int], set[tupl
 def find_sssr(mol: "Molecule", max_ring_size: int | None = None) -> list[set[int]]:
     """Find Smallest Set of Smallest Rings (SSSR).
     
-    Uses a DFS-based approach to find all simple cycles in the molecule.
+    The SSSR is a linearly independent basis of cycles where:
+    - The number of rings equals the cyclomatic complexity (E - V + C)
+    - Larger rings that can be expressed as combinations of smaller rings are excluded
+    
+    For example, naphthalene has cyclomatic complexity 2 (11 bonds - 10 atoms + 1),
+    so its SSSR contains exactly 2 rings (the two 6-membered rings), not the
+    10-membered envelope ring.
     
     Args:
         mol: Molecule to analyze.
@@ -171,13 +177,16 @@ def find_sssr(mol: "Molecule", max_ring_size: int | None = None) -> list[set[int
     for start in range(n):
         dfs_find_cycles(start, start, [start], {start})
     
-    # Remove duplicates and keep smallest unique rings
+    # Remove duplicates
     unique_rings = _filter_unique_rings(all_rings)
+    
+    # Compute proper SSSR (linearly independent set)
+    sssr = _compute_sssr(unique_rings, n, len(mol.bonds), adj)
     
     # Filter by size if limit is set
     if max_ring_size is not None:
-        return [r for r in unique_rings if len(r) <= max_ring_size]
-    return unique_rings
+        return [r for r in sssr if len(r) <= max_ring_size]
+    return sssr
 
 
 def _filter_unique_rings(rings: list[tuple[int, ...]]) -> list[set[int]]:
@@ -204,6 +213,117 @@ def _filter_unique_rings(rings: list[tuple[int, ...]]) -> list[set[int]]:
             unique.append(set(ring))
     
     return unique
+
+
+def _get_ring_bonds_from_atoms(ring: set[int], adj: dict[int, set[int]]) -> set[frozenset[int]]:
+    """Get the bonds (as frozensets of 2 atoms) that form a ring.
+    
+    Args:
+        ring: Set of atom indices in the ring.
+        adj: Adjacency list for the molecule.
+    
+    Returns:
+        Set of frozensets, each containing 2 atom indices representing a bond.
+    """
+    bonds: set[frozenset[int]] = set()
+    for atom in ring:
+        for neighbor in adj[atom]:
+            if neighbor in ring:
+                bonds.add(frozenset([atom, neighbor]))
+    return bonds
+
+
+def _compute_sssr(
+    all_rings: list[set[int]], 
+    num_atoms: int, 
+    num_bonds: int,
+    adj: dict[int, set[int]],
+) -> list[set[int]]:
+    """Compute the Smallest Set of Smallest Rings (SSSR).
+    
+    The SSSR is a linearly independent set of rings where:
+    - The number of rings equals the cyclomatic complexity
+    - Each ring cannot be expressed as a combination of other rings in the set
+    
+    We use a greedy algorithm that selects rings by size, checking linear
+    independence using the bond-based representation (each ring is a vector
+    of bonds, and rings are independent if their bond sets form a linearly
+    independent set over GF(2) - the field with XOR as addition).
+    
+    Args:
+        all_rings: All unique rings found in the molecule.
+        num_atoms: Number of atoms in the molecule.
+        num_bonds: Number of bonds in the molecule.
+        adj: Adjacency list mapping atom index to neighbor set.
+    
+    Returns:
+        The SSSR as a list of atom index sets.
+    """
+    if not all_rings:
+        return []
+    
+    # Calculate cyclomatic complexity (number of independent cycles)
+    # For a connected graph: mu = E - V + 1
+    # For multiple components: mu = E - V + C
+    # We'll compute the actual number of components
+    
+    # Find connected components
+    visited: set[int] = set()
+    num_components = 0
+    
+    def dfs_component(start: int) -> None:
+        stack = [start]
+        while stack:
+            node = stack.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            stack.extend(adj[node] - visited)
+    
+    for atom in range(num_atoms):
+        if atom not in visited and atom in adj:
+            dfs_component(atom)
+            num_components += 1
+    
+    # Cyclomatic complexity
+    mu = num_bonds - num_atoms + num_components
+    
+    if mu <= 0:
+        return []
+    
+    # Sort rings by size (prefer smaller rings)
+    sorted_rings = sorted(all_rings, key=len)
+    
+    # Convert rings to bond sets for linear independence checking
+    ring_bond_sets: list[tuple[set[int], set[frozenset[int]]]] = []
+    for ring in sorted_rings:
+        bonds = _get_ring_bonds_from_atoms(ring, adj)
+        ring_bond_sets.append((ring, bonds))
+    
+    # Greedily select linearly independent rings
+    # Using Gaussian elimination over GF(2) (XOR basis)
+    sssr: list[set[int]] = []
+    # Basis vectors represented as sets of bonds (XOR = symmetric difference)
+    basis: list[set[frozenset[int]]] = []
+    
+    for ring, bonds in ring_bond_sets:
+        if len(sssr) >= mu:
+            break
+        
+        # Try to reduce this ring's bond set using existing basis
+        reduced = set(bonds)
+        for basis_vec in basis:
+            # Check if XOR with this basis vector reduces the size
+            xor_result = reduced.symmetric_difference(basis_vec)
+            if len(xor_result) < len(reduced):
+                reduced = xor_result
+        
+        # If reduced to non-empty, this ring is linearly independent
+        if reduced:
+            sssr.append(ring)
+            basis.append(set(bonds))
+    
+    return sssr
 
 
 def get_ring_membership(mol: "Molecule") -> dict[int, int]:
