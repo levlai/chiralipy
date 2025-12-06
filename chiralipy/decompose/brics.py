@@ -95,8 +95,6 @@ BRICS_RULES_BY_ORDER: dict[int, list[tuple[str, str]]] = {1: [], 2: []}
 for label1, label2, order in BRICS_RULES:
     BRICS_RULES_BY_ORDER[order].append((label1, label2))
 
-ATOM_ENVIRONS = ENVIRONS
-
 _COMPILED_PATTERNS: dict[str, Molecule | None] = {}
 _PATTERN_ADJS: dict[str, dict[int, list[tuple[int, int]]]] = {}
 _PATTERNS_BY_SYMBOL: dict[str, list[str]] | None = None

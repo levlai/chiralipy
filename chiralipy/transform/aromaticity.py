@@ -24,10 +24,10 @@ from chiralipy.elements import (
     get_default_valence,
     OUTER_ELECTRONS,
 )
-from chiralipy.rings import find_sssr, find_ring_systems
+from chiralipy.rings import find_sssr
 
 if TYPE_CHECKING:
-    from chiralipy.types import Atom, Bond, Molecule
+    from chiralipy.types import Atom, Molecule
 
 
 @runtime_checkable

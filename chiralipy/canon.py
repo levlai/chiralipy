@@ -17,14 +17,6 @@ if TYPE_CHECKING:
     from chiralipy.types import Molecule
 
 
-# =============================================================================
-# Constants
-# =============================================================================
-
-# =============================================================================
-# Helper functions
-# =============================================================================
-
 def _count_swaps_to_interconvert(perm: list[int], sorted_perm: list[int]) -> int:
     """Count minimum swaps to convert perm to sorted_perm.
     
