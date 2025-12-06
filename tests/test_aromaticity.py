@@ -95,6 +95,204 @@ class TestMixedAromaticity:
         assert len(aromatic_atoms) == 12
 
 
+class TestFusedRingAromaticity:
+    """Test aromaticity in fused ring systems."""
+    
+    def test_naphthalene_bridgehead_aromatic(self):
+        """In naphthalene, the bridgehead bond IS aromatic.
+        
+        Naphthalene is a fully aromatic system - all 11 bonds are aromatic.
+        """
+        mol = parse("c1ccc2ccccc2c1")
+        perceive_aromaticity(mol)
+        
+        # All atoms should be aromatic
+        assert all(a.is_aromatic for a in mol.atoms)
+        
+        # All bonds should be aromatic (including bridgehead)
+        assert all(b.is_aromatic for b in mol.bonds)
+    
+    def test_hypoxanthine_bridgehead_not_aromatic(self):
+        """In purine-like systems, the bridgehead bond is NOT aromatic.
+        
+        This matches RDKit's aromaticity model where bonds shared between
+        multiple rings (bridgehead bonds) are marked as non-aromatic SINGLE bonds.
+        
+        The canonical SMILES should include explicit '-' for the bridgehead:
+        RDKit: Oc1[nH]cnc2ncnc1-2
+        """
+        mol = parse("c1nc2ncnc-2c(O)[nH]1")
+        
+        # All atoms in the fused system should be aromatic
+        # (except O which is outside the ring)
+        aromatic_atoms = [a for a in mol.atoms if a.is_aromatic]
+        assert len(aromatic_atoms) >= 8  # 8 atoms in the fused ring system
+        
+        # The bridgehead bond (between the two rings) should NOT be aromatic
+        # Find the bond connecting the two ring systems
+        bridgehead_bonds = []
+        for bond in mol.bonds:
+            a1 = mol.atoms[bond.atom1_idx]
+            a2 = mol.atoms[bond.atom2_idx]
+            # Bridgehead is C-C bond between two aromatic carbons
+            if (a1.symbol.upper() == 'C' and a2.symbol.upper() == 'C' and 
+                a1.is_aromatic and a2.is_aromatic and not bond.is_aromatic):
+                bridgehead_bonds.append(bond)
+        
+        # Should have exactly one non-aromatic bridgehead bond
+        assert len(bridgehead_bonds) == 1, (
+            f"Expected 1 non-aromatic bridgehead bond, found {len(bridgehead_bonds)}"
+        )
+    
+    def test_hypoxanthine_canonical_smiles_matches_rdkit(self):
+        """The canonical SMILES for hypoxanthine should match RDKit.
+        
+        This tests that the writer outputs explicit '-' for bridgehead bonds.
+        """
+        rdkit = pytest.importorskip("rdkit")
+        from rdkit import Chem
+        from chiralipy import to_smiles
+        
+        # Parse the molecule
+        smiles = "c1nc2ncnc-2c(O)[nH]1"
+        mol = parse(smiles)
+        
+        # Get canonical SMILES from both
+        chirpy_canonical = to_smiles(mol)
+        
+        rdkit_mol = Chem.MolFromSmiles(smiles)
+        rdkit_canonical = Chem.MolToSmiles(rdkit_mol)
+        
+        assert chirpy_canonical == rdkit_canonical, (
+            f"Canonical SMILES mismatch:\n"
+            f"  chiralipy: {chirpy_canonical}\n"
+            f"  RDKit:     {rdkit_canonical}"
+        )
+
+    def test_quinone_indole_fused_not_aromatic(self):
+        """Quinone fused with indole - quinone ring is NOT aromatic.
+        
+        The molecule Cc1=c-c(=O)-c2c([nH]c3ccc(Cl)cc23)-c-1=O has:
+        - An indole-like aromatic system (fused pyrrole + benzene)
+        - A quinone-like ring with C=O groups that is NOT aromatic
+        
+        The carbonyl carbons break the aromaticity of the quinone ring.
+        RDKit canonical: CC1=CC(=O)c2c([nH]c3ccc(Cl)cc23)C1=O
+        """
+        rdkit = pytest.importorskip("rdkit")
+        from rdkit import Chem
+        from chiralipy import to_smiles
+        
+        smiles = "Cc1=c-c(=O)-c2c([nH]c3ccc(Cl)cc23)-c-1=O"
+        mol = parse(smiles)
+        
+        # Get canonical SMILES from both
+        chirpy_canonical = to_smiles(mol)
+        
+        rdkit_mol = Chem.MolFromSmiles(smiles)
+        rdkit_canonical = Chem.MolToSmiles(rdkit_mol)
+        
+        assert chirpy_canonical == rdkit_canonical, (
+            f"Canonical SMILES mismatch:\n"
+            f"  chiralipy: {chirpy_canonical}\n"
+            f"  RDKit:     {rdkit_canonical}"
+        )
+
+    def test_triazole_fused_to_saturated_ring(self):
+        """Triazole ring fused to a saturated ring should still be aromatic.
+        
+        The molecule C1Cn2c(nnc2C(F)(F)F)C1 has:
+        - A triazole ring (5-membered with 3 N) which IS aromatic
+        - A saturated 5-membered ring (piperidine-like) fused to it
+        
+        The triazole should be aromatic even though it's fused to a saturated ring.
+        This is important because the sp3 carbons in the saturated ring don't
+        break the aromaticity of the triazole - they're not part of that ring.
+        
+        RDKit canonical: FC(F)(F)c1nnc2n1CCC2
+        """
+        rdkit = pytest.importorskip("rdkit")
+        from rdkit import Chem
+        from chiralipy import to_smiles
+        
+        smiles = "C1Cn2c(nnc2C(F)(F)F)C1"
+        mol = parse(smiles)
+        
+        # Get canonical SMILES from both
+        chirpy_canonical = to_smiles(mol)
+        
+        rdkit_mol = Chem.MolFromSmiles(smiles)
+        rdkit_canonical = Chem.MolToSmiles(rdkit_mol)
+        
+        assert chirpy_canonical == rdkit_canonical, (
+            f"Canonical SMILES mismatch:\n"
+            f"  chiralipy: {chirpy_canonical}\n"
+            f"  RDKit:     {rdkit_canonical}"
+        )
+
+    def test_difluorophenyl_triazole_piperazine(self):
+        """Full molecule with difluorophenyl, triazole, and piperazine.
+        
+        The molecule O=C(c1cccc(F)c1F)N1CCn2c(nnc2C(F)(F)F)C1 has:
+        - A difluorobenzene (aromatic)
+        - A triazole ring (aromatic) fused to a saturated ring
+        - A piperazine-like ring (non-aromatic)
+        
+        RDKit canonical: O=C(c1cccc(F)c1F)N1CCn2c(nnc2C(F)(F)F)C1
+        """
+        rdkit = pytest.importorskip("rdkit")
+        from rdkit import Chem
+        from chiralipy import to_smiles
+        
+        smiles = "O=C(c1cccc(F)c1F)N1CCn2c(nnc2C(F)(F)F)C1"
+        mol = parse(smiles)
+        
+        # Get canonical SMILES from both
+        chirpy_canonical = to_smiles(mol)
+        
+        rdkit_mol = Chem.MolFromSmiles(smiles)
+        rdkit_canonical = Chem.MolToSmiles(rdkit_mol)
+        
+        assert chirpy_canonical == rdkit_canonical, (
+            f"Canonical SMILES mismatch:\n"
+            f"  chiralipy: {chirpy_canonical}\n"
+            f"  RDKit:     {rdkit_canonical}"
+        )
+
+    def test_thiadiazole_lactam_exocyclic_double_bond(self):
+        """Thiadiazole-lactam: ring with exocyclic double bond is NOT aromatic.
+        
+        The molecule O=C1Cn2nc(-c3ccccc3)sc2=N1 has:
+        - A thiadiazole-like ring that would normally be aromatic
+        - But it has an exocyclic C=N double bond from the ring carbon
+        
+        RDKit rule: atoms with exocyclic double bonds cannot be aromatic candidates
+        (allowExocyclicMultipleBonds = false in RDKit's aromaticity perception).
+        
+        So the thiadiazole ring is NOT aromatic, while the phenyl is.
+        
+        RDKit canonical: O=C1CN2N=C(c3ccccc3)SC2=N1
+        """
+        rdkit = pytest.importorskip("rdkit")
+        from rdkit import Chem
+        from chiralipy import to_smiles
+        
+        smiles = "O=C1Cn2nc(-c3ccccc3)sc2=N1"
+        mol = parse(smiles)
+        
+        # Get canonical SMILES from both
+        chirpy_canonical = to_smiles(mol)
+        
+        rdkit_mol = Chem.MolFromSmiles(smiles)
+        rdkit_canonical = Chem.MolToSmiles(rdkit_mol)
+        
+        assert chirpy_canonical == rdkit_canonical, (
+            f"Canonical SMILES mismatch:\n"
+            f"  chiralipy: {chirpy_canonical}\n"
+            f"  RDKit:     {rdkit_canonical}"
+        )
+
+
 class TestAromaticityPreserver:
     """Test AromaticityPerceiver class."""
 

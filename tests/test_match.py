@@ -300,7 +300,7 @@ class TestMatchesRDKit:
         if use_aromaticity:
             perceive_aromaticity(chirpy_mol)
         # SMARTS patterns explicitly encode aromaticity, don't override
-        chirpy_pattern = parse(pattern_smarts)
+        chirpy_pattern = parse(pattern_smarts, perceive_aromaticity=False)
         chirpy_matches = substructure_search(chirpy_mol, chirpy_pattern)
         
         # Compare counts

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Final
 
 from chiralipy.elements import BondOrder
+from chiralipy.rings import _find_ring_atoms_and_bonds_fast, get_ring_info
 
 if TYPE_CHECKING:
     from chiralipy.types import Molecule
@@ -20,8 +21,35 @@ if TYPE_CHECKING:
 # Constants
 # =============================================================================
 
-_MAX_NATOMS: Final[int] = 1_000_000
-_MAX_BONDTYPE: Final[int] = 4
+# =============================================================================
+# Helper functions
+# =============================================================================
+
+def _count_swaps_to_interconvert(perm: list[int], sorted_perm: list[int]) -> int:
+    """Count minimum swaps to convert perm to sorted_perm.
+    
+    Uses a cycle decomposition approach to count swaps.
+    """
+    if len(perm) != len(sorted_perm):
+        return 0
+    
+    # Create a mapping from value to target position
+    target_pos = {v: i for i, v in enumerate(sorted_perm)}
+    
+    # Work on a copy
+    current = list(perm)
+    n_swaps = 0
+    
+    for i in range(len(current)):
+        # Find where current[i] should go
+        target = target_pos[current[i]]
+        while target != i:
+            # Swap current[i] with current[target]
+            current[i], current[target] = current[target], current[i]
+            n_swaps += 1
+            target = target_pos[current[i]]
+    
+    return n_swaps
 
 
 # =============================================================================
@@ -36,6 +64,7 @@ class _BondHolder:
     nbr_sym_class: int
     nbr_idx: int
     bond_idx: int
+    nbr_chiral_code: int = 0  # Chirality contribution from this neighbor
     
     @staticmethod
     def compare(x: "_BondHolder", y: "_BondHolder") -> int:
@@ -48,6 +77,10 @@ class _BondHolder:
         
         if x.nbr_sym_class != y.nbr_sym_class:
             return -1 if x.nbr_sym_class < y.nbr_sym_class else 1
+        
+        # Compare chirality contribution from neighbor
+        if x.nbr_chiral_code != y.nbr_chiral_code:
+            return -1 if x.nbr_chiral_code < y.nbr_chiral_code else 1
         
         return 0
 
@@ -62,6 +95,10 @@ class _CanonAtom:
     formal_charge: int
     total_num_hs: int
     has_chirality: bool
+    is_aromatic: bool
+    is_in_ring: bool
+    min_ring_size: int
+    chirality_tag: int  # 0 = none, 1 = CW (@), 2 = CCW (@@)
     nbr_ids: list[int] = field(default_factory=list)
     bonds: list[_BondHolder] = field(default_factory=list)
     index: int = 0  # Current partition/symmetry class
@@ -263,12 +300,60 @@ class _AtomCompareFunctor:
         return 0
     
     def _update_neighbor_index(self, atom_idx: int) -> None:
-        """Update neighbor symmetry classes and sort bonds."""
+        """Update neighbor symmetry classes, chirality codes, and sort bonds."""
         atom = self.atoms[atom_idx]
         for bh in atom.bonds:
-            bh.nbr_sym_class = self.atoms[bh.nbr_idx].index
-        # Sort descending by (bond_type, bond_stereo, nbr_sym_class)
-        atom.bonds.sort(key=lambda bh: (-bh.bond_type, -bh.bond_stereo, -bh.nbr_sym_class))
+            nbr = self.atoms[bh.nbr_idx]
+            bh.nbr_sym_class = nbr.index
+            
+            # Compute chirality code using chiral rank algorithm
+            if self.use_chirality and nbr.chirality_tag != 0:
+                bh.nbr_chiral_code = self._get_chiral_rank(bh.nbr_idx)
+            else:
+                bh.nbr_chiral_code = 0
+        
+        # Sort ascending by (bond_type, bond_stereo, nbr_sym_class, nbr_chiral_code)
+        # Sort neighbors ascending to determine rank
+        atom.bonds.sort(key=lambda bh: (bh.bond_type, bh.bond_stereo, bh.nbr_sym_class, bh.nbr_chiral_code))
+    
+    def _get_chiral_rank(self, atom_idx: int) -> int:
+        """Compute chiral rank for an atom.
+        
+        Returns 0 for non-chiral atoms, 1 or 2 for chiral atoms based on
+        the chirality tag and the permutation of neighbor ranks.
+        
+        IMPORTANT: Must use original neighbor order (nbr_ids), not sorted bonds.
+        """
+        atom = self.atoms[atom_idx]
+        if atom.chirality_tag == 0:
+            return 0
+        
+        # Get neighbor ranks in ORIGINAL bond iteration order (nbr_ids)
+        # This is critical - uses original order
+        perm = []
+        for nbr_idx in atom.nbr_ids:
+            rnk = self.atoms[nbr_idx].index
+            # Make sure we don't have duplicate ranks
+            if rnk in perm:
+                return 0  # Can't determine chirality with duplicate ranks
+            perm.append(rnk)
+        
+        if len(perm) != atom.degree:
+            return 0
+        
+        # Sort the permutation
+        sorted_perm = sorted(perm)
+        
+        # Count swaps to convert perm to sorted_perm
+        n_swaps = _count_swaps_to_interconvert(perm, sorted_perm)
+        
+        # chirality_tag: 1 = CW (@@), 2 = CCW (@)
+        # Return 2 for CW, 1 for CCW, then flip if odd swaps
+        res = 2 if atom.chirality_tag == 1 else 1
+        if n_swaps % 2:
+            res = 1 if res == 2 else 2
+        
+        return res
     
     def _basecomp(self, i: int, j: int) -> int:
         """Base comparison without neighbor info."""
@@ -282,33 +367,158 @@ class _AtomCompareFunctor:
         # 2. Degree
         if ai.degree != aj.degree:
             return -1 if ai.degree < aj.degree else 1
-        
-        # 3. Atomic number
+
+        # 3. Ring membership (Not in ring < In ring)
+        if ai.is_in_ring != aj.is_in_ring:
+            return -1 if not ai.is_in_ring else 1
+
+        # 4. Aromaticity (Aromatic < Not Aromatic)
+        if ai.is_aromatic != aj.is_aromatic:
+            return -1 if ai.is_aromatic else 1
+
+        # 5. Atomic number
         if ai.atomic_num != aj.atomic_num:
             return -1 if ai.atomic_num < aj.atomic_num else 1
+
+        # 6. Ring Size (Descending: 6 < 5)
+        if ai.min_ring_size != aj.min_ring_size:
+            return -1 if ai.min_ring_size > aj.min_ring_size else 1
         
-        # 4. Isotope
+        # 7. Isotope
         if self.use_isotopes and ai.isotope != aj.isotope:
             return -1 if ai.isotope < aj.isotope else 1
         
-        # 5. Total Hs
+        # 8. Total Hs
         if ai.total_num_hs != aj.total_num_hs:
             return -1 if ai.total_num_hs < aj.total_num_hs else 1
         
-        # 6. Formal charge - uses unsigned comparison for proper ordering
+        # 9. Formal charge - uses unsigned comparison for proper ordering
         ui = ai.formal_charge & 0xFFFFFFFF
         uj = aj.formal_charge & 0xFFFFFFFF
         if ui != uj:
             return -1 if ui < uj else 1
-        
-        # 7. Chirality presence
+            
+        # 9. Presence of chirality (has chirality or not)
         if self.use_chirality:
-            ci = 1 if ai.has_chirality else 0
-            cj = 1 if aj.has_chirality else 0
-            if ci != cj:
-                return -1 if ci < cj else 1
+            ivi = 1 if ai.chirality_tag != 0 else 0
+            ivj = 1 if aj.chirality_tag != 0 else 0
+            if ivi != ivj:
+                return -1 if ivi < ivj else 1
+            
+            # 8. If both are chiral, use chiral rank
+            if ivi and ivj:
+                chiral_rank_i = self._get_chiral_rank(i)
+                chiral_rank_j = self._get_chiral_rank(j)
+                if chiral_rank_i != chiral_rank_j:
+                    return -1 if chiral_rank_i < chiral_rank_j else 1
         
         return 0
+
+
+# =============================================================================
+# Special Chirality Comparator for neighbor-based chirality comparison
+# =============================================================================
+
+class _SpecialChiralityAtomCompareFunctor:
+    """Special atom comparison functor for chirality-based tie breaking.
+    
+    Compares atoms based on how their chiral neighbors would rank them.
+    """
+    
+    def __init__(self, atoms: list[_CanonAtom]) -> None:
+        self.atoms = atoms
+    
+    def __call__(self, i: int, j: int) -> int:
+        """Compare atoms i and j based on chiral neighbor swaps."""
+        # First update and compare neighbor indices
+        self._update_neighbor_index(i)
+        self._update_neighbor_index(j)
+        
+        ai = self.atoms[i]
+        aj = self.atoms[j]
+        
+        for k in range(min(len(ai.bonds), len(aj.bonds))):
+            cmp = _BondHolder.compare(ai.bonds[k], aj.bonds[k])
+            if cmp != 0:
+                return cmp
+        
+        # Then compare based on chiral neighbor swaps
+        swaps_i = self._get_neighbor_num_swaps(i)
+        swaps_j = self._get_neighbor_num_swaps(j)
+        
+        for k in range(min(len(swaps_i), len(swaps_j))):
+            cmp = swaps_i[k][1] - swaps_j[k][1]
+            if cmp != 0:
+                return -1 if cmp < 0 else 1
+        
+        return 0
+    
+    def _update_neighbor_index(self, atom_idx: int) -> None:
+        """Update neighbor symmetry classes and sort bonds."""
+        atom = self.atoms[atom_idx]
+        for bh in atom.bonds:
+            nbr = self.atoms[bh.nbr_idx]
+            bh.nbr_sym_class = nbr.index
+        
+        # Sort ascending by (bond_type, bond_stereo, nbr_sym_class)
+        atom.bonds.sort(key=lambda bh: (bh.bond_type, bh.bond_stereo, bh.nbr_sym_class))
+    
+    def _get_neighbor_num_swaps(self, atom_idx: int) -> list[tuple[int, int]]:
+        """Compute chiral swap counts for each neighbor.
+        
+        For each neighbor, if it's a chiral atom, compute the number of swaps
+        needed to move atom_idx to the front of the neighbor's neighbor list.
+        """
+        result = []
+        atom = self.atoms[atom_idx]
+        
+        for bh in atom.bonds:
+            nbr_idx = bh.nbr_idx
+            nbr = self.atoms[nbr_idx]
+            
+            if nbr.chirality_tag != 0:
+                # Build reference order: neighbor's original neighbor IDs
+                ref = list(nbr.nbr_ids)
+                
+                # Check for duplicate ranks among neighbors (except atom_idx)
+                neighbors_seen = []
+                too_many_similar = False
+                for nid in ref:
+                    if nid != atom_idx:
+                        nbr_nbr_index = self.atoms[nid].index
+                        if nbr_nbr_index in neighbors_seen:
+                            too_many_similar = True
+                            break
+                        neighbors_seen.append(nbr_nbr_index)
+                
+                if too_many_similar:
+                    result.append((bh.nbr_sym_class, 0))
+                else:
+                    # Build probe order: atom_idx first, then other neighbors in bond order
+                    probe = [atom_idx]
+                    for other_bh in nbr.bonds:
+                        if other_bh.nbr_idx != atom_idx:
+                            probe.append(other_bh.nbr_idx)
+                    
+                    n_swaps = _count_swaps_to_interconvert(ref, probe)
+                    
+                    # Determine result based on chirality tag and swap parity
+                    # chirality_tag: 1 = CW (@@), 2 = CCW (@)
+                    if nbr.chirality_tag == 1:  # CW
+                        if n_swaps % 2:
+                            result.append((bh.nbr_sym_class, 2))
+                        else:
+                            result.append((bh.nbr_sym_class, 1))
+                    else:  # CCW
+                        if n_swaps % 2:
+                            result.append((bh.nbr_sym_class, 1))
+                        else:
+                            result.append((bh.nbr_sym_class, 2))
+            else:
+                result.append((bh.nbr_sym_class, 0))
+        
+        result.sort()
+        return result
 
 
 # =============================================================================
@@ -359,7 +569,7 @@ def _activate_partitions(
 
 def _refine_partitions(
     atoms: list[_CanonAtom],
-    ftor: _AtomCompareFunctor,
+    ftor: Callable[[int, int], int],
     order: list[int],
     count: list[int],
     activeset: int,
@@ -507,6 +717,18 @@ def _rank_mol_atoms(
         next_arr, changed, touched
     )
     
+    # Check for ties after initial refinement
+    ties = any(c == 0 for c in count)
+    
+    # Apply special chirality functor if there are ties and chirality is enabled
+    if include_chirality and ties:
+        scftor = _SpecialChiralityAtomCompareFunctor(atoms)
+        activeset = _activate_partitions(n_atoms, order, count, next_arr, changed)
+        activeset = _refine_partitions(
+            atoms, scftor, order, count, activeset,
+            next_arr, changed, touched
+        )
+    
     if break_ties_flag:
         _break_ties(
             atoms, ftor, order, count, activeset,
@@ -593,6 +815,9 @@ class Canonicalizer:
         mol = self._mol
         n = len(mol.atoms)
         
+        ring_atoms, _ = _find_ring_atoms_and_bonds_fast(mol)
+        _, ring_sizes_map = get_ring_info(mol, _ring_atoms=ring_atoms)
+        
         self._atoms = []
         
         for atom in mol.atoms:
@@ -614,6 +839,18 @@ class Canonicalizer:
                 )
                 total_hs = atom.explicit_hydrogens + implicit_hs
             
+            # Determine chirality tag:
+            # 0 = none, 1 = CW (@@), 2 = CCW (@)
+            chirality_tag = 0
+            if atom.chirality == "@":
+                chirality_tag = 2  # @ = CCW
+            elif atom.chirality == "@@":
+                chirality_tag = 1  # @@ = CW
+            
+            min_ring = 0
+            if atom.idx in ring_sizes_map and ring_sizes_map[atom.idx]:
+                min_ring = min(ring_sizes_map[atom.idx])
+            
             canon_atom = _CanonAtom(
                 atom_idx=atom.idx,
                 degree=len(atom.bond_indices),
@@ -622,6 +859,10 @@ class Canonicalizer:
                 formal_charge=atom.charge,
                 total_num_hs=total_hs,
                 has_chirality=(atom.chirality is not None),
+                is_aromatic=atom.is_aromatic,
+                is_in_ring=(atom.idx in ring_atoms),
+                min_ring_size=min_ring,
+                chirality_tag=chirality_tag,
                 nbr_ids=nbr_ids,
             )
             self._atoms.append(canon_atom)

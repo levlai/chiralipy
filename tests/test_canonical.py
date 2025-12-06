@@ -322,6 +322,34 @@ class TestRingMatchesRDKit:
         assert result == expected, f"Input: {smiles}, Expected: {expected}, Got: {result}"
 
 
+class TestRingClosureOrderingMatchesRDKit:
+    """Test that ring closure ordering matches RDKit exactly.
+    
+    When an atom has multiple ring closures, they must be ordered
+    in the same way as RDKit for identical SMILES output.
+    RDKit orders multiple ring closures by bond type first (aromatic before single),
+    then by neighbor rank.
+    """
+
+    @pytest.mark.parametrize("smiles", [
+        # N-oxide triazole fused system - multiple closures at fusion atom
+        "c1cnn2c1n[n+]([O-])c1ccc(Cl)cc12",
+        # Fused ring systems with multiple closures
+        "c1ccc2c(c1)c1ccccc1c1ccccc21",  # fluorene-like
+        "c1cc2ccc3cccc4ccc(c1)c2c34",     # pyrene
+        # Bridged systems
+        "C1CC2CCC1C2",                     # norbornane
+        "C1CC2CCC1CC2",                    # bicyclo[3.2.1]octane
+        # Hypoxanthine - aromatic and non-aromatic closures at same atom
+        "Oc1ncnc2nc[nH]c12",
+    ])
+    def test_ring_closure_ordering(self, smiles):
+        """Ring closure ordering must match RDKit exactly."""
+        expected = rdkit_canonical(smiles)
+        result = canonical_smiles(smiles)
+        assert result == expected, f"Input: {smiles}, Expected: {expected}, Got: {result}"
+
+
 class TestMultiComponentMatchesRDKit:
     """Test canonical SMILES for multi-component systems matches RDKit."""
 
@@ -449,23 +477,25 @@ class TestComplexMoleculesMatchRDKit:
     def test_caffeine(self):
         """Caffeine - tests fused aromatic heterocycle handling.
         
-        Note: Caffeine has a purine (fused imidazole-pyrimidine) core that
-        RDKit aromatizes using a sophisticated model. Caffeine contains C=O 
-        groups which chirpy's simple aromaticity perceiver doesn't handle.
+        Caffeine has a purine (fused imidazole-pyrimidine) core that
+        RDKit aromatizes using its sophisticated model. Caffeine contains C=O 
+        groups with exocyclic double bonds. The RDKit-compatible aromaticity
+        model correctly handles this by:
+        1. Allowing atoms with exocyclic bonds to more electronegative atoms
+        2. "Stealing" electrons when the exocyclic atom is more electronegative
+        3. Properly counting pi electrons for Hückel's rule
         
-        This test is marked as xfail until advanced aromaticity perception
-        is implemented.
+        This test verifies our RDKit-compatible aromaticity perception works.
         """
         smiles = "CN1C=NC2=C1C(=O)N(C(=O)N2C)C"
         expected = rdkit_canonical(smiles)
         result = canonical_smiles(smiles)
         
-        # Mark as expected failure for now
-        if result != expected:
-            pytest.xfail(
-                f"Caffeine aromaticity requires advanced model. "
-                f"Expected: {expected}, Got: {result}"
-            )
+        assert result == expected, (
+            f"Caffeine canonical SMILES mismatch:\n"
+            f"  Expected: {expected}\n"
+            f"  Got:      {result}"
+        )
 
 
 class TestRDKitTestCases:

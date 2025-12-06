@@ -549,6 +549,11 @@ def get_pi_contribution(
         elif charge == -1:
             # Carbanion: 5 outer e⁻, 3 in σ bonds, 2 in p orbital
             return (2, None)
+        elif has_exo_double:
+            # Exocyclic double bond (e.g., C=O or C=C outside ring):
+            # The π electron goes to that external bond, not available for ring.
+            # This is why thiazolone C=O carbons don't contribute to aromaticity.
+            return (0, None)
         elif has_pi_bond:
             # Neutral sp2: 4 outer e⁻, 3 in σ bonds, 1 in p orbital
             return (1, None)

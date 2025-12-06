@@ -21,8 +21,8 @@ class TestFindBRICSBonds:
         "CCNCC",          # amine
         "CC(=O)OC",       # ester
         "CC(=O)NC",       # amide
-        "c1ccccc1C",      # toluene
-        "c1ccccc1CC",     # ethylbenzene
+        # NOTE: Toluene (c1ccccc1C) removed - methyl is D1 so not cleavable by BRICS
+        "c1ccccc1CC",     # ethylbenzene - CH2 is D2 so cleavable
         "CCOc1ccccc1",    # anisole (ethoxy benzene)
     ])
     def test_finds_cleavable_bonds(self, smiles: str) -> None:
@@ -32,6 +32,17 @@ class TestFindBRICSBonds:
         
         # Should find at least one cleavable bond
         assert len(bonds) > 0, f"No BRICS bonds found for {smiles}"
+    
+    def test_toluene_no_cleavable_bonds(self) -> None:
+        """Test that toluene has no BRICS cleavable bonds.
+        
+        The methyl carbon in toluene is degree 1 (D1), which is excluded
+        by the L8 pattern [C;!R;!D1;!$(C!-*)]. RDKit also returns no 
+        BRICS bonds for toluene.
+        """
+        mol = parse("c1ccccc1C")
+        bonds = list(find_brics_bonds(mol))
+        assert len(bonds) == 0, "Toluene should not have BRICS cleavable bonds"
     
     @pytest.mark.parametrize("smiles", [
         "CC",             # ethane (C-C not cleavable by BRICS rules)
@@ -201,6 +212,61 @@ class TestBRICSDecompose:
         
         assert isinstance(list(fragments_smi)[0] if fragments_smi else "", str)
         assert len(fragments_mol) >= 0  # Just check it doesn't crash
+
+
+class TestBRICSChiralityPreservation:
+    """Test that chirality is correctly preserved during BRICS decomposition."""
+    
+    @pytest.mark.parametrize("smiles,expected_frags", [
+        # Case 1: Chiral cyclobutane with carboxylic acid - bond to COOH broken
+        # RDKit: [C@] stays as [C@] in output (traversal from dummy)
+        ("N[C@]1(C(=O)O)C[C@@H](/C=C/I)C1", 
+         {'[6*]C(=O)O', '[15*][C@]1(N)C[C@H](/C=C/I)C1'}),
+        # Case 2: Opposite stereochemistry on the second chiral center
+        ("N[C@]1(C(=O)O)C[C@H](/C=C/I)C1",
+         {'[6*]C(=O)O', '[15*][C@]1(N)C[C@@H](/C=C/I)C1'}),
+    ])
+    def test_brics_chirality_matches_rdkit(self, smiles: str, expected_frags: set) -> None:
+        """Test that BRICS decomposition preserves chirality correctly.
+        
+        When a bond at a chiral center is broken and replaced with a dummy atom,
+        the chirality symbol in the canonical SMILES may need to change based on
+        the new traversal order. This test verifies chiralipy matches RDKit exactly.
+        
+        The key insight is that chirality is relative to the neighbor order in
+        the SMILES output, which changes when the canonical traversal starts from
+        a different atom (e.g., the dummy atom instead of the original neighbor).
+        """
+        # Chirpy result
+        mol = parse(smiles)
+        chirpy_frags = brics_decompose(mol)
+        
+        # Normalize: strip atom class labels for comparison
+        import re
+        chirpy_normalized = set()
+        for frag in chirpy_frags:
+            # Remove atom class labels like :1, :2, etc.
+            normalized = re.sub(r':\d+\]', ']', frag)
+            chirpy_normalized.add(normalized)
+        
+        # RDKit result
+        rdmol = Chem.MolFromSmiles(smiles)
+        rdkit_frags = set(BRICS.BRICSDecompose(rdmol))
+        
+        # Compare with expected (which is RDKit's output)
+        assert chirpy_normalized == expected_frags, (
+            f"Chirality mismatch for {smiles}:\n"
+            f"  chiralipy: {sorted(chirpy_normalized)}\n"
+            f"  expected:  {sorted(expected_frags)}\n"
+            f"  rdkit:     {sorted(rdkit_frags)}"
+        )
+        
+        # Also verify against RDKit directly
+        assert chirpy_normalized == rdkit_frags, (
+            f"Chirality mismatch vs RDKit for {smiles}:\n"
+            f"  chiralipy: {sorted(chirpy_normalized)}\n"
+            f"  rdkit:     {sorted(rdkit_frags)}"
+        )
 
 
 class TestBRICSCompareWithRDKit:
@@ -452,6 +518,104 @@ class TestBRICSReturnStems:
                 f"Expected no stems for molecule without cleavage, got {stems}"
 
 
+class TestBRICSExactMatchWithRDKit:
+    """Test that BRICS decomposition exactly matches RDKit output.
+    
+    These tests verify that chiralipy's BRICS implementation produces
+    identical fragments to RDKit for complex drug-like molecules.
+    """
+    
+    @staticmethod
+    def canonicalize_fragments(frag_set):
+        """Canonicalize fragments for comparison.
+        
+        Strips atom class labels (e.g., [16*:5] -> [16*]) and 
+        canonicalizes SMILES using RDKit.
+        """
+        import re
+        result = set()
+        for smi in frag_set:
+            # Strip atom class labels for comparison
+            smi_no_class = re.sub(r':\d+\]', ']', smi)
+            try:
+                m = Chem.MolFromSmiles(smi_no_class)
+                if m:
+                    result.add(Chem.MolToSmiles(m))
+            except:
+                pass
+        return result
+    
+    @pytest.mark.parametrize("smiles,name", [
+        # Molecule 1: sulfonamide with purine core
+        ("c1ccc(C2CCCCC2)c(c1)S(=O)(=O)NCCNc3nccc4c3ncn4C(C)C", 
+         "sulfonamide-purine"),
+        # Molecule 2: carbamate with dimethoxyphenyl
+        ("CC(C)CCCCOC(=O)Nc1c(OC)cccc1OC", 
+         "carbamate-dimethoxyphenyl"),
+        # Molecule 3: piperazine urea with pyrazole
+        ("Cc1cc(NC(=O)N2CCN(CC2)Cc3ccccc3)n(n1)c4ccc(Cl)cc4", 
+         "piperazine-urea-pyrazole"),
+        # Molecule 4: fused purine
+        ("Oc1[nH]cnc2ncnc1-2", 
+         "fused-purine"),
+    ])
+    def test_exact_match_with_rdkit(self, smiles: str, name: str) -> None:
+        """Test that chiralipy BRICS decomposition exactly matches RDKit.
+        
+        This is a strict test - both implementations must produce identical
+        fragment sets (after canonicalization).
+        """
+        # Chirpy decomposition
+        mol = parse(smiles)
+        chirpy_frags = brics_decompose(mol)
+        
+        # RDKit decomposition
+        rdmol = Chem.MolFromSmiles(smiles)
+        rdkit_frags = set(BRICS.BRICSDecompose(rdmol))
+        
+        # Canonicalize both for comparison
+        chirpy_canonical = self.canonicalize_fragments(chirpy_frags)
+        rdkit_canonical = self.canonicalize_fragments(rdkit_frags)
+        
+        # Must have exact same fragments
+        assert chirpy_canonical == rdkit_canonical, (
+            f"BRICS decomposition mismatch for {name}:\n"
+            f"  SMILES: {smiles}\n"
+            f"  chirpy ({len(chirpy_canonical)}): {sorted(chirpy_canonical)}\n"
+            f"  rdkit ({len(rdkit_canonical)}): {sorted(rdkit_canonical)}"
+        )
+    
+    def test_stereochemistry_preserved(self) -> None:
+        """Test that stereochemistry is preserved in fragments.
+        
+        Molecule 5: epoxide amide with stereochemistry
+        """
+        smiles = "NC(=O)[C@@H]1O[C@@H]1C(=O)Nc1ccc(Br)c(Cl)c1"
+        
+        # Chirpy decomposition
+        mol = parse(smiles)
+        chirpy_frags = brics_decompose(mol)
+        
+        # RDKit decomposition
+        rdmol = Chem.MolFromSmiles(smiles)
+        rdkit_frags = set(BRICS.BRICSDecompose(rdmol))
+        
+        # Canonicalize both
+        chirpy_canonical = self.canonicalize_fragments(chirpy_frags)
+        rdkit_canonical = self.canonicalize_fragments(rdkit_frags)
+        
+        # Must match exactly
+        assert chirpy_canonical == rdkit_canonical, (
+            f"BRICS decomposition mismatch for stereochemistry test:\n"
+            f"  chirpy ({len(chirpy_canonical)}): {sorted(chirpy_canonical)}\n"
+            f"  rdkit ({len(rdkit_canonical)}): {sorted(rdkit_canonical)}"
+        )
+        
+        # Additionally check that @ symbols are present (stereochemistry preserved)
+        has_stereo = any('@' in frag for frag in chirpy_frags)
+        assert has_stereo, "Expected stereochemistry (@) in fragments"
+
+
 class TestBRICSEnvironments:
     """Test BRICS environment matching."""
     
@@ -481,10 +645,127 @@ class TestBRICSEnvironments:
         assert len(bonds) >= 1
     
     def test_aromatic_cleavage_l16(self) -> None:
-        """Test L16 environment (aromatic carbon)."""
-        smiles = "c1ccccc1C"  # toluene
+        """Test L16 environment (aromatic carbon).
+        
+        Toluene (c1ccccc1C) does NOT have a cleavable bond because
+        the methyl is D1 (degree 1) which is excluded by L8.
+        
+        Ethylbenzene (c1ccccc1CC) DOES have a cleavable bond because
+        the CH2 is D2 which matches L8, paired with L16 for the aromatic carbon.
+        """
+        # Ethylbenzene - CH2-benzene bond is cleavable
+        smiles = "c1ccccc1CC"  # ethylbenzene, not toluene
         mol = parse(smiles)
         bonds = list(find_brics_bonds(mol))
         
-        # Should find Ar-C bond as cleavable
+        # Should find Ar-CH2 bond as cleavable (L8-L16)
         assert len(bonds) >= 1
+
+
+class TestBRICSStereochemistry:
+    """Test BRICS decomposition handles stereochemistry correctly."""
+    
+    def test_double_bond_stereo_removed_after_cleavage(self) -> None:
+        """Test that E/Z stereo markers are removed after cleavage breaks the double bond.
+        
+        When a double bond is cleaved, the resulting fragments should not retain
+        the / or \\ stereo markers that were associated with the original double bond.
+        This test case is for a molecule where the double bond is cleaved and one
+        fragment becomes a ring - the stereo marker should be cleared.
+        
+        Regression test for: O=C1N=C(NO)S/C1=C/c1cccc([N+](=O)[O-])c1
+        The [7*]C1SC(NO)=NC1=O fragment should become O=C1CSC(NO)=N1 (no stereo)
+        not O=C1C/SC(NO)=N1 (with stereo).
+        """
+        smiles = "O=C1N=C(NO)S/C1=C/c1cccc([N+](=O)[O-])c1"
+        
+        # Get chiralipy fragments with stems
+        result = brics_decompose(smiles, return_stems=True)
+        
+        # Check that no fragment contains invalid stereo markers (/ or \)
+        # These should only appear in double bonds, not single bonds
+        for chiralipy_smiles in result.keys():
+            # Parse to check if stereo markers are present
+            parsed_mol = Chem.MolFromSmiles(chiralipy_smiles)
+            assert parsed_mol is not None, f"Invalid SMILES: {chiralipy_smiles}"
+            
+            # Check that the raw chiralipy SMILES doesn't have / or \ on ring single bonds
+            # The thiazolone should be O=C1CSC(NO)=N1, not O=C1C/SC(NO)=N1
+            if "CSC" in chiralipy_smiles or "C/SC" in chiralipy_smiles or "C\\SC" in chiralipy_smiles:
+                # This is the thiazolone fragment
+                assert "/" not in chiralipy_smiles and "\\" not in chiralipy_smiles, (
+                    f"Unexpected stereo marker in thiazolone fragment: {chiralipy_smiles}\n"
+                    f"Expected: O=C1CSC(NO)=N1 (no stereo markers on ring bonds)"
+                )
+        
+        # Get RDKit fragments
+        rdmol = Chem.MolFromSmiles(smiles)
+        rdkit_frags = BRICS.BRICSDecompose(rdmol, returnMols=True)
+        
+        # Get RDKit canonical SMILES for each fragment (after removing dummies)
+        rdkit_canonical = set()
+        for frag in rdkit_frags:
+            new_mol = Chem.RWMol(frag)
+            dummy_idx = [a.GetIdx() for a in frag.GetAtoms() if a.GetAtomicNum() == 0]
+            for idx in sorted(dummy_idx, reverse=True):
+                new_mol.RemoveAtom(idx)
+            rdkit_canonical.add(Chem.MolToSmiles(new_mol))
+        
+        # Get chiralipy canonical SMILES (via RDKit to compare)
+        chiralipy_canonical = set()
+        for chiralipy_smiles in result.keys():
+            parsed_mol = Chem.MolFromSmiles(chiralipy_smiles)
+            if parsed_mol:
+                chiralipy_canonical.add(Chem.MolToSmiles(parsed_mol))
+        
+        # All fragments should match
+        assert chiralipy_canonical == rdkit_canonical, (
+            f"Fragment mismatch:\n"
+            f"  chiralipy: {sorted(chiralipy_canonical)}\n"
+            f"  RDKit:     {sorted(rdkit_canonical)}"
+        )
+
+    def test_chirality_cleared_after_dummy_removal(self) -> None:
+        """Test that chirality markers are cleared when dummy atoms are removed.
+        
+        When a dummy atom is removed from a chiral center, the center loses a 
+        substituent and chirality becomes undefined (only 3 distinct groups remain).
+        The @ or @@ markers should be cleared.
+        
+        Regression test for: [*][C@@H]1O[C@@H]1[*] (chiral epoxide with dummies)
+        After removing dummies, should become C1CO1 (no chirality), not [C@@H]1[C@@H]O1.
+        """
+        from chiralipy.parser import parse
+        from chiralipy.decompose.brics import _strip_dummy_atoms_and_mark_stems
+        from chiralipy.canon import canonical_ranks
+        from chiralipy.writer import to_smiles
+        
+        smiles = "[*][C@@H]1O[C@@H]1[*]"
+        mol = parse(smiles)
+        
+        # Strip dummies
+        stripped = _strip_dummy_atoms_and_mark_stems(mol)
+        
+        # Check chirality is cleared
+        for atom in stripped.atoms:
+            assert atom.chirality is None, (
+                f"Atom {atom.idx} ({atom.symbol}) should not have chirality after dummy removal, "
+                f"but has chirality={atom.chirality}"
+            )
+        
+        # Check canonical SMILES matches RDKit
+        ranks = canonical_ranks(stripped)
+        chiralipy_result = to_smiles(stripped, ranks)
+        
+        rdmol = Chem.MolFromSmiles(smiles)
+        new_mol = Chem.RWMol(rdmol)
+        dummy_idx = [a.GetIdx() for a in rdmol.GetAtoms() if a.GetAtomicNum() == 0]
+        for idx in sorted(dummy_idx, reverse=True):
+            new_mol.RemoveAtom(idx)
+        rdkit_result = Chem.MolToSmiles(new_mol)
+        
+        assert chiralipy_result == rdkit_result, (
+            f"SMILES mismatch after dummy removal:\n"
+            f"  chiralipy: {chiralipy_result}\n"
+            f"  RDKit:     {rdkit_result}"
+        )

@@ -26,14 +26,13 @@ from typing import Final
 
 from chiralipy.elements import (
     AROMATIC_SUBSET,
-    ORGANIC_SUBSET,
     TWO_LETTER_ORGANIC,
     Element,
     is_aromatic_symbol,
-    BondOrder,
 )
 from chiralipy.exceptions import ParseError, RingError
-from chiralipy.types import Atom, Bond, Molecule
+from chiralipy.types import Atom, Molecule
+from chiralipy.transform.aromaticity import AromaticityPerceiver
 
 
 class _Tokenizer:
@@ -145,6 +144,12 @@ class _ParserState:
     # Branch stack for parentheses
     branch_stack: list[int] = field(default_factory=list)
     
+    # Parent tracking for ring path detection
+    # Maps atom_idx -> parent_atom_idx (the atom this atom was connected from)
+    parent_atom: dict[int, int] = field(default_factory=dict)
+    # Maps atom_idx -> bond_idx (the bond connecting this atom to its parent)
+    parent_bond: dict[int, int] = field(default_factory=dict)
+    
     # Current state
     prev_atom: int | None = None
     pending_bond_order: int | None = None
@@ -157,6 +162,7 @@ class _ParserState:
     # SMARTS bond query fields
     pending_bond_ring: bool | None = None  # True = must be ring bond (@)
     pending_bond_not_ring: bool = False    # True = must NOT be ring bond (!@)
+    pending_bond_negated: bool = False     # True = bond order is negated (!-, !=, !#)
 
 
 class SmilesParser:
@@ -263,6 +269,11 @@ class SmilesParser:
                 self._state.pending_bond_dative = True
                 self._state.pending_bond_dative_dir = -1  # reverse direction
                 self._state.pending_bond_order = 6  # DATIVE order
+                continue
+            
+            # Check for negated bonds !- != !# (SMARTS)
+            if char == "!" and tok.peek(1) in "-=#":
+                self._parse_negated_bond()
                 continue
             
             if char in "-=#:$~@" or char in "/\\":
@@ -385,6 +396,34 @@ class SmilesParser:
                 self._state.pending_bond_ring = True
                 continue
     
+    def _parse_negated_bond(self) -> None:
+        """Parse a negated bond (!-, !=, !#).
+        
+        In SMARTS, !- means "not a single bond", != means "not a double bond", etc.
+        This is used in patterns like C!-* to match carbons with non-single bonds.
+        """
+        tok = self._tokenizer
+        
+        tok.next()  # consume '!'
+        char = tok.next()  # consume the bond character
+        
+        # Reset bond query state
+        self._state.pending_bond_ring = None
+        self._state.pending_bond_not_ring = False
+        
+        if char in self._BOND_CHARS:
+            order, aromatic, is_dative, dative_dir, is_any = self._BOND_CHARS[char]
+            self._state.pending_bond_order = order
+            self._state.pending_bond_aromatic = aromatic
+            self._state.pending_bond_stereo = None
+            self._state.pending_bond_dative = is_dative
+            self._state.pending_bond_dative_dir = dative_dir
+            self._state.pending_bond_any = is_any
+            self._state.pending_bond_negated = True  # Mark as negated
+            
+            # Check for SMARTS bond expression continuation (;)
+            self._parse_bond_expression()
+    
     def _parse_wildcard_atom(self) -> None:
         """Parse a wildcard atom (*)."""
         is_first = self._state.prev_atom is None
@@ -397,7 +436,7 @@ class SmilesParser:
         self._mol.atoms[atom_idx]._was_first_in_component = is_first
         
         # Add bond to previous atom
-        self._add_bond_to_previous(atom_idx, False)
+        self._add_bond_to_previous(atom_idx)
         
         self._state.prev_atom = atom_idx
     
@@ -423,13 +462,13 @@ class SmilesParser:
             atom1, order1, aromatic1 = self._state.open_rings.pop(ring_idx)
             atom2 = atom_idx
             
-            # Determine bond properties
+            # Determine bond properties for the closing bond
             order = self._state.pending_bond_order or order1 or 1
             aromatic = self._state.pending_bond_aromatic
             if aromatic is None:
                 aromatic = aromatic1
             if aromatic is None:
-                # Infer from atoms
+                # Infer from atoms - ring closing bond between aromatic atoms is aromatic
                 aromatic = (
                     self._mol.atoms[atom1].is_aromatic and
                     self._mol.atoms[atom2].is_aromatic
@@ -441,6 +480,11 @@ class SmilesParser:
                 order=1 if aromatic else order,
                 is_aromatic=aromatic,
             )
+            
+            # If the ring is aromatic, trace back through the parse tree
+            # to mark ALL bonds in the ring path as aromatic
+            if aromatic:
+                self._mark_ring_bonds_aromatic(atom1, atom2)
             
             # Update SMILES neighbor order for chiral atoms at both ends
             # atom1 had a placeholder recorded when it opened this ring
@@ -562,7 +606,7 @@ class SmilesParser:
         self._mol.atoms[atom_idx]._was_first_in_component = is_first
         
         # Add bond to previous atom
-        self._add_bond_to_previous(atom_idx, aromatic)
+        self._add_bond_to_previous(atom_idx)
         
         self._state.prev_atom = atom_idx
     
@@ -598,7 +642,7 @@ class SmilesParser:
                 is_wildcard=True,
             )
             self._mol.atoms[atom_idx]._was_first_in_component = is_first
-            self._add_bond_to_previous(atom_idx, False)
+            self._add_bond_to_previous(atom_idx)
             self._state.prev_atom = atom_idx
             return
         
@@ -615,6 +659,8 @@ class SmilesParser:
         ring_count: int | None = None
         ring_size: int | None = None
         degree_query: int | None = None
+        degree_query_list: list[int] = []  # For OR'd degree queries [D2,D3]
+        negated_degree_query: int | None = None  # For [!D1] negated degree
         valence_query: int | None = None
         connectivity_query: int | None = None
         is_recursive = False
@@ -622,6 +668,7 @@ class SmilesParser:
         negated_recursive_smarts: list[str] = []
         atom_list: list[str] = []
         atomic_number_list: list[int] = []
+        negated_atomic_number_list: list[int] = []
         charge_query: int | None = None
         
         # Check for recursive SMARTS $(...) 
@@ -642,7 +689,7 @@ class SmilesParser:
                 recursive_smarts=recursive_smarts,
             )
             self._mol.atoms[atom_idx]._was_first_in_component = is_first
-            self._add_bond_to_previous(atom_idx, False)
+            self._add_bond_to_previous(atom_idx)
             self._state.prev_atom = atom_idx
             return
         
@@ -684,16 +731,25 @@ class SmilesParser:
                 symbol = atom_list[0] if atom_list else "*"
         elif char1 == "#":
             # Atomic number specification [#6] = carbon or [#0,#6,#7] = list
+            # If is_negated is True (from leading !), this is [!#6] - negated atomic number
             tok.next()
             atomic_num = tok.read_number()
             if atomic_num is not None:
-                atomic_number_list.append(atomic_num)
-                # Handle atomic number as symbol
-                if atomic_num == 0:
-                    symbol = "*"  # #0 = dummy atom / any
+                if is_negated:
+                    # Leading ! means this is a negated atomic number [!#6]
+                    negated_atomic_number_list.append(atomic_num)
+                    # Set wildcard symbol since we're matching "not this element"
+                    symbol = "*"
+                    # Reset is_negated so it doesn't affect atom_list_negated
+                    is_negated = False
                 else:
-                    elem = Element.from_atomic_number(atomic_num)
-                    symbol = elem.symbol if elem else "*"
+                    atomic_number_list.append(atomic_num)
+                    # Handle atomic number as symbol
+                    if atomic_num == 0:
+                        symbol = "*"  # #0 = dummy atom / any
+                    else:
+                        elem = Element.from_atomic_number(atomic_num)
+                        symbol = elem.symbol if elem else "*"
                 
                 # Check for comma-separated atomic number list [#0,#6,#7]
                 while tok.peek() == ",":
@@ -794,13 +850,26 @@ class SmilesParser:
                 # We'll add this to SMARTS attributes
                 pass  # Currently parsed but not stored; can be extended
             elif char == ",":
-                # More atom list entries
+                # More atom list entries OR degree list entries
                 tok.next()
-                next_symbol = self._read_element_symbol()
-                if next_symbol and next_symbol not in atom_list:
-                    if not atom_list and symbol != "*":
-                        atom_list.append(symbol)
-                    atom_list.append(next_symbol)
+                next_char = tok.peek()
+                # Check if this is a degree query continuation [C;D2,D3]
+                if next_char == "D":
+                    tok.next()  # consume D
+                    d_num = tok.read_number()
+                    if d_num is not None:
+                        # Add to degree list; also add current degree_query if set
+                        if degree_query is not None and degree_query not in degree_query_list:
+                            degree_query_list.append(degree_query)
+                        if d_num not in degree_query_list:
+                            degree_query_list.append(d_num)
+                else:
+                    # Regular atom list continuation
+                    next_symbol = self._read_element_symbol()
+                    if next_symbol and next_symbol not in atom_list:
+                        if not atom_list and symbol != "*":
+                            atom_list.append(symbol)
+                        atom_list.append(next_symbol)
             elif char == ";":
                 # SMARTS AND operator - just continue parsing more attributes
                 tok.next()
@@ -817,7 +886,7 @@ class SmilesParser:
                 else:
                     tok.next()  # Skip unrecognized $
             elif char == "!":
-                # Negation - handle negated queries like !R, !D1, etc.
+                # Negation - handle negated queries like !R, !D1, !#6, etc.
                 tok.next()
                 next_char = tok.peek()
                 if next_char == "R":
@@ -825,9 +894,22 @@ class SmilesParser:
                     num = tok.read_number()
                     ring_count = 0 if num is None else -num - 100  # Signal negated
                 elif next_char == "D":
+                    # Negated degree query !D1, !D2, etc.
                     tok.next()
                     num = tok.read_number()
-                    # Could store negated degree
+                    if num is not None:
+                        negated_degree_query = num
+                    else:
+                        negated_degree_query = -1  # !D means not any degree (always false?)
+                elif next_char == "#":
+                    # Negated atomic number !#6, !#16, etc.
+                    tok.next()  # consume #
+                    num = tok.read_number()
+                    if num is not None:
+                        negated_atomic_number_list.append(num)
+                        # If this is the first atom specifier, set symbol to wildcard
+                        if not symbol or symbol == "*":
+                            symbol = "*"
                 elif next_char == "$":
                     # Negated recursive SMARTS !$(...)
                     if self._lookahead_recursive():
@@ -868,9 +950,12 @@ class SmilesParser:
             atom_list=atom_list if atom_list else None,
             atom_list_negated=is_negated,
             atomic_number_list=atomic_number_list if atomic_number_list else None,
+            negated_atomic_number_list=negated_atomic_number_list if negated_atomic_number_list else None,
             ring_count=ring_count,
             ring_size=ring_size,
             degree_query=degree_query,
+            degree_query_list=degree_query_list if degree_query_list else None,
+            negated_degree_query=negated_degree_query,
             valence_query=valence_query,
             connectivity_query=connectivity_query,
             is_recursive=is_recursive,
@@ -881,7 +966,7 @@ class SmilesParser:
         self._mol.atoms[atom_idx]._was_first_in_component = is_first
         
         # Add bond to previous atom
-        self._add_bond_to_previous(atom_idx, aromatic)
+        self._add_bond_to_previous(atom_idx)
         
         # Initialize _smiles_neighbor_bonds for chiral atoms after the "from" bond is added
         if chirality:
@@ -1054,17 +1139,53 @@ class SmilesParser:
         
         return sign * max(1, count), False
     
-    def _add_bond_to_previous(self, atom_idx: int, is_aromatic: bool) -> None:
+    def _mark_ring_bonds_aromatic(self, ring_start: int, ring_end: int) -> None:
+        """Mark all bonds in a ring path as aromatic.
+        
+        When a ring closure occurs between two aromatic atoms, this method traces
+        back through the parse tree from ring_end to ring_start, marking all
+        bonds along the path as aromatic.
+        
+        This is the algorithmic solution for aromatic bond assignment:
+        - Ring bonds are identified at parse time when ring closures occur
+        - All bonds in the ring path are marked aromatic if both endpoints are aromatic
+        - This correctly handles all aromatic ring systems without post-processing
+        
+        Args:
+            ring_start: The atom index where the ring was opened (the '1' in c1...)
+            ring_end: The atom index where the ring was closed (...c1)
+        """
+        # Trace back from ring_end to ring_start through parent chain
+        current = ring_end
+        
+        while current != ring_start:
+            if current not in self._state.parent_bond:
+                # Should not happen in well-formed SMILES, but be defensive
+                break
+            
+            bond_idx = self._state.parent_bond[current]
+            bond = self._mol.bonds[bond_idx]
+            
+            # Only mark as aromatic if BOTH atoms in this bond are aromatic
+            atom1 = self._mol.atoms[bond.atom1_idx]
+            atom2 = self._mol.atoms[bond.atom2_idx]
+            if atom1.is_aromatic and atom2.is_aromatic:
+                bond.is_aromatic = True
+            
+            # Move to parent
+            current = self._state.parent_atom[current]
+
+    def _add_bond_to_previous(self, atom_idx: int) -> None:
         """Add bond from previous atom to new atom."""
         if self._state.prev_atom is None:
             return
         
         prev_atom = self._mol.atoms[self._state.prev_atom]
-        prev_aromatic = prev_atom.is_aromatic
         
         # Capture bond query state before resetting
         is_ring_bond = self._state.pending_bond_ring
         is_not_ring_bond = self._state.pending_bond_not_ring
+        is_negated = self._state.pending_bond_negated
         
         # Handle any bond (~) for SMARTS
         if self._state.pending_bond_any:
@@ -1078,6 +1199,9 @@ class SmilesParser:
                 is_not_ring_bond=is_not_ring_bond,
             )
             self._update_smiles_neighbor_order(prev_atom, bond_idx)
+            # Track parent for ring path detection
+            self._state.parent_atom[atom_idx] = self._state.prev_atom
+            self._state.parent_bond[atom_idx] = bond_idx
             self._reset_bond_state()
             return
         
@@ -1094,16 +1218,21 @@ class SmilesParser:
                 is_not_ring_bond=is_not_ring_bond,
             )
             self._update_smiles_neighbor_order(prev_atom, bond_idx)
+            # Track parent for ring path detection
+            self._state.parent_atom[atom_idx] = self._state.prev_atom
+            self._state.parent_bond[atom_idx] = bond_idx
             self._reset_bond_state()
             return
         
         # Determine bond properties
+        # Chain bonds are NOT aromatic during initial parsing.
+        # Aromatic bonds are assigned when ring closures occur,
+        # which traces back through the parse tree to mark all bonds in the ring.
         if self._state.pending_bond_order is not None or self._state.pending_bond_aromatic is not None:
             order = self._state.pending_bond_order or 1
             aromatic = bool(self._state.pending_bond_aromatic)
         else:
-            # Infer aromatic bond between aromatic atoms
-            aromatic = prev_aromatic and is_aromatic
+            aromatic = False
             order = 1
         
         bond_idx = self._mol.add_bond(
@@ -1114,10 +1243,15 @@ class SmilesParser:
             stereo=self._state.pending_bond_stereo,
             is_ring_bond=is_ring_bond,
             is_not_ring_bond=is_not_ring_bond,
+            is_negated=is_negated,
         )
         
         # Update SMILES neighbor order for chiral prev_atom
         self._update_smiles_neighbor_order(prev_atom, bond_idx)
+        
+        # Track parent for ring path detection
+        self._state.parent_atom[atom_idx] = self._state.prev_atom
+        self._state.parent_bond[atom_idx] = bond_idx
         
         self._reset_bond_state()
     
@@ -1132,23 +1266,38 @@ class SmilesParser:
         self._state.pending_bond_aromatic = None
         self._state.pending_bond_stereo = None
         self._state.pending_bond_dative = False
-        self._state.pending_bond_dative_dir = None
+        self._state.pending_bond_dative_dir = 0
         self._state.pending_bond_any = False
         self._state.pending_bond_ring = None
         self._state.pending_bond_not_ring = False
+        self._state.pending_bond_negated = False
 
 
-def parse(smiles: str) -> Molecule:
+def parse(smiles: str, perceive_aromaticity: bool = True) -> Molecule:
     """Parse a SMILES string into a Molecule.
     
-    This is a convenience function that creates a SmilesParser and
-    calls parse().
+    Aromatic bond assignment is done algorithmically during parsing:
+    
+    1. **Atom aromaticity**: Identified from lowercase SMILES notation (c, n, o, s, etc.)
+    
+    2. **Bond aromaticity**: When a ring closure occurs between two aromatic atoms,
+       the parser traces back through the parse tree and marks ALL bonds in the
+       ring path as aromatic (if both endpoint atoms of each bond are aromatic).
+    
+    This algorithmic approach correctly handles:
+    - Simple aromatic rings: benzene (c1ccccc1) - all 6 bonds aromatic
+    - Connected aromatic rings: biphenyl (c1ccccc1c2ccccc2) - connecting bond NOT aromatic
+    - Fused aromatic rings: naphthalene (c1ccc2ccccc2c1) - all bonds aromatic
+    - Mixed systems: aromatic ring connected to aliphatic - only ring bonds aromatic
     
     Args:
         smiles: SMILES string to parse.
+        perceive_aromaticity: If True (default), re-perceive aromaticity using
+            Hückel's rule after parsing. Set to False for SMARTS patterns where
+            lowercase letters explicitly indicate aromaticity requirements.
     
     Returns:
-        Parsed Molecule object.
+        Parsed Molecule object with correct aromatic bond assignment.
     
     Raises:
         ParseError: If SMILES syntax is invalid.
@@ -1157,5 +1306,17 @@ def parse(smiles: str) -> Molecule:
         >>> mol = parse("CCO")
         >>> len(mol.atoms)
         3
+        >>> mol = parse("c1ccccc1")  # benzene
+        >>> sum(1 for b in mol.bonds if b.is_aromatic)
+        6
     """
-    return SmilesParser(smiles).parse()
+    mol = SmilesParser(smiles).parse()
+    
+    if perceive_aromaticity:
+        # Re-perceive aromaticity using Hückel's rule
+        # Input SMILES may have incorrect aromaticity notation
+        # (e.g., lowercase letters for non-aromatic rings)
+        perceiver = AromaticityPerceiver()
+        perceiver.perceive(mol)
+    
+    return mol

@@ -54,6 +54,7 @@ class Bond:
     # SMARTS bond query fields
     is_ring_bond: bool | None = None  # True = must be ring bond (@), False = no constraint
     is_not_ring_bond: bool = False    # True = must NOT be ring bond (!@)
+    is_negated: bool = False          # True = bond order is negated (!-, !=, !#)
     
     def other_atom(self, atom_idx: int) -> int:
         """Get the index of the atom on the other end of this bond.
@@ -134,9 +135,12 @@ class Atom:
     atom_list: list[str] | None = None
     atom_list_negated: bool = False
     atomic_number_list: list[int] | None = None  # For [#0,#6,#7] patterns
+    negated_atomic_number_list: list[int] | None = None  # For [!#6;!#16;!#0;!#1] patterns
     ring_count: int | None = None
     ring_size: int | None = None
     degree_query: int | None = None
+    degree_query_list: list[int] | None = None  # For [D2,D3] OR'd degree queries
+    negated_degree_query: int | None = None  # For [!D1] negated degree
     valence_query: int | None = None
     connectivity_query: int | None = None
     is_recursive: bool = False
@@ -179,11 +183,11 @@ class Atom:
         """Get the default valence for this element."""
         return get_default_valence(self.atomic_number)
     
-    def degree(self, mol: "Molecule") -> int:
+    def degree(self, _mol: "Molecule") -> int:
         """Get the number of bonds to this atom.
         
         Args:
-            mol: Parent molecule.
+            _mol: Parent molecule (unused, kept for API consistency).
         
         Returns:
             Number of bonds (degree).
@@ -300,9 +304,12 @@ class Molecule:
         atom_list: list[str] | None = None,
         atom_list_negated: bool = False,
         atomic_number_list: list[int] | None = None,
+        negated_atomic_number_list: list[int] | None = None,
         ring_count: int | None = None,
         ring_size: int | None = None,
         degree_query: int | None = None,
+        degree_query_list: list[int] | None = None,
+        negated_degree_query: int | None = None,
         valence_query: int | None = None,
         connectivity_query: int | None = None,
         is_recursive: bool = False,
@@ -325,9 +332,12 @@ class Molecule:
             atom_list: SMARTS atom list [C,N,O].
             atom_list_negated: Whether atom list is negated [!C].
             atomic_number_list: SMARTS atomic number list [#0,#6,#7].
+            negated_atomic_number_list: SMARTS negated atomic number list [!#6;!#16].
             ring_count: SMARTS ring membership query.
             ring_size: SMARTS ring size query.
             degree_query: SMARTS degree query.
+            degree_query_list: SMARTS OR'd degree query list [D2,D3].
+            negated_degree_query: SMARTS negated degree query [!D1].
             valence_query: SMARTS valence query.
             connectivity_query: SMARTS connectivity query.
             is_recursive: Whether this is a recursive SMARTS.
@@ -353,9 +363,12 @@ class Molecule:
             atom_list=atom_list,
             atom_list_negated=atom_list_negated,
             atomic_number_list=atomic_number_list,
+            negated_atomic_number_list=list(negated_atomic_number_list) if negated_atomic_number_list else None,
             ring_count=ring_count,
             ring_size=ring_size,
             degree_query=degree_query,
+            degree_query_list=list(degree_query_list) if degree_query_list else None,
+            negated_degree_query=negated_degree_query,
             valence_query=valence_query,
             connectivity_query=connectivity_query,
             is_recursive=is_recursive,
@@ -379,6 +392,7 @@ class Molecule:
         is_any: bool = False,
         is_ring_bond: bool | None = None,
         is_not_ring_bond: bool = False,
+        is_negated: bool = False,
     ) -> int:
         """Add a bond between two atoms.
         
@@ -393,6 +407,7 @@ class Molecule:
             is_any: Whether this is a SMARTS any bond.
             is_ring_bond: SMARTS ring bond constraint (@).
             is_not_ring_bond: SMARTS not ring bond constraint (!@).
+            is_negated: SMARTS negated bond order (!-, !=, !#).
         
         Returns:
             Index of the newly added bond.
@@ -416,6 +431,7 @@ class Molecule:
             is_any=is_any,
             is_ring_bond=is_ring_bond,
             is_not_ring_bond=is_not_ring_bond,
+            is_negated=is_negated,
         )
         self.bonds.append(bond)
         self.atoms[atom1_idx].bond_indices.append(idx)

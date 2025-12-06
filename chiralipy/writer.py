@@ -7,6 +7,7 @@ to SMILES strings, with support for canonical ordering.
 
 from __future__ import annotations
 
+import heapq
 from typing import TYPE_CHECKING, Final
 
 from chiralipy.transform.aromaticity import perceive_aromaticity
@@ -18,9 +19,34 @@ if TYPE_CHECKING:
     from chiralipy.types import Atom, Bond, Molecule
 
 
-# Constants for canonical traversal
-_MAX_NATOMS: Final[int] = 1_000_000
-_MAX_BONDTYPE: Final[int] = 4
+# Bond type values for canonical ordering
+_BONDTYPE_SINGLE: Final[int] = 1
+_BONDTYPE_DOUBLE: Final[int] = 2
+_BONDTYPE_TRIPLE: Final[int] = 3
+_BONDTYPE_AROMATIC: Final[int] = 12
+
+
+def _get_bond_type(bond: Bond) -> int:
+    """Get bond type value for canonical traversal.
+    
+    Maps chiralipy bond properties to integer values used for canonical ordering.
+    
+    Args:
+        bond: Bond to get type for.
+    
+    Returns:
+        Integer bond type value.
+    """
+    if bond.is_aromatic:
+        return _BONDTYPE_AROMATIC
+    elif bond.order == 1:
+        return _BONDTYPE_SINGLE
+    elif bond.order == 2:
+        return _BONDTYPE_DOUBLE
+    elif bond.order == 3:
+        return _BONDTYPE_TRIPLE
+    else:
+        return bond.order  # Fallback for unusual bond orders
 
 
 def count_swaps_to_interconvert(ref: list[int], probe: list[int]) -> int:
@@ -82,16 +108,22 @@ class SmilesWriter:
         self,
         mol: Molecule,
         ranks: list[int] | None = None,
+        include_atom_class: bool = True,
+        include_stereo: bool = True,
     ) -> None:
         """Initialize writer.
         
         Args:
             mol: Molecule to write.
             ranks: Pre-computed canonical ranks (computed if None).
+            include_atom_class: If True (default), include atom class annotations (:N).
+            include_stereo: If True (default), include bond stereochemistry (/, \\).
         """
         self._mol = mol
         self._ranks = ranks if ranks is not None else canonical_ranks(mol)
         self._ring_bonds: set[int] | None = None
+        self._include_atom_class = include_atom_class
+        self._include_stereo = include_stereo
     
     def to_smiles(self) -> str:
         """Generate canonical SMILES string.
@@ -132,7 +164,10 @@ class SmilesWriter:
             colors[atom_idx] = GREY
             atom = self._mol.atoms[atom_idx]
             
-            possibles: list[tuple[int, int, int]] = []
+            # Priority tuple: (category, -effective_bondtype, rank)
+            # Category: 0=Ring Closure, 1=Normal, 2=Ring Start
+            possibles: list[tuple[tuple[int, int, int], int, int]] = []
+            
             for bond_idx in atom.bond_indices:
                 if bond_idx == in_bond_idx:
                     continue
@@ -143,16 +178,29 @@ class SmilesWriter:
                 
                 rank = self._ranks[nbr]
                 
-                if colors[nbr] == GREY:
-                    # Ring closure
-                    rank -= (_MAX_BONDTYPE + 1) * _MAX_NATOMS * _MAX_NATOMS
-                    rank += (_MAX_BONDTYPE - bond.order) * _MAX_NATOMS
-                elif bond_idx in ring_bonds:
-                    rank += (_MAX_BONDTYPE - bond.order) * _MAX_NATOMS * _MAX_NATOMS
+                # Calculate effective bond type for traversal ordering
+                # Higher bondType = lower penalty = traversed first
+                # We simulate this: aromatic bonds get bondtype 2, non-aromatic single get 1
+                effective_bondtype = bond.order
+                if bond.is_aromatic:
+                    effective_bondtype = max(effective_bondtype, 2)  # Aromatic treated as at least double
                 
-                possibles.append((rank, nbr, bond_idx))
+                category = 1  # Default: Normal bond
+                if colors[nbr] == GREY:
+                    # Ring closure - highest priority (lowest category value)
+                    category = 0
+                elif bond_idx in ring_bonds:
+                    # Ring start - lowest priority (highest category value)
+                    category = 2
+                
+                # For normal bonds (category 1), bond type doesn't affect order in RDKit
+                # For ring bonds (0 and 2), higher bond type comes first (so we negate it)
+                bond_priority = -effective_bondtype if category != 1 else 0
+                
+                possibles.append(((category, bond_priority, rank), nbr, bond_idx))
             
-            possibles.sort(key=lambda x: (x[0], x[1]))
+            # Sort by priority tuple
+            possibles.sort(key=lambda x: x[0])
             
             for _, nbr, bond_idx in possibles:
                 if colors[nbr] == WHITE:
@@ -168,12 +216,13 @@ class SmilesWriter:
         # Phase 2: Build SMILES
         colors = {a: WHITE for a in comp_atoms}
         ring_digit_map: dict[int, int] = {}
-        available_digits: list[int] = list(range(1, 100))
+        available_digits: list[int] = []  # Heap of available digits
+        next_new_digit = 1
         out: list[str] = []
         chirality_inversion: dict[int, bool] = {}
         
         def dfs_build(atom_idx: int, in_bond_idx: int | None) -> None:
-            nonlocal available_digits
+            nonlocal next_new_digit
             colors[atom_idx] = GREY
             atom = self._mol.atoms[atom_idx]
             seen_from_here: set[int] = {atom_idx}
@@ -183,13 +232,22 @@ class SmilesWriter:
                 traversal_bonds.append(in_bond_idx)
             
             ring_closure_bonds: list[int] = []
-            other_bonds: list[tuple[int, int, int]] = []
+            other_bonds: list[tuple[tuple[int, int, int], int, int]] = []
             
             for bond_idx in atom_ring_closures[atom_idx]:
                 bond = self._mol.bonds[bond_idx]
                 nbr = bond.other_atom(atom_idx)
                 ring_closure_bonds.append(bond_idx)
                 seen_from_here.add(nbr)
+            
+            # Sort ring closures for canonical output:
+            # Sort by neighbor rank for both
+            def ring_closure_sort_key(bond_idx: int) -> int:
+                bond = self._mol.bonds[bond_idx]
+                nbr = bond.other_atom(atom_idx)
+                return self._ranks[nbr]
+            
+            ring_closure_bonds.sort(key=ring_closure_sort_key)
             
             for bond_idx in atom.bond_indices:
                 if bond_idx == in_bond_idx:
@@ -202,11 +260,21 @@ class SmilesWriter:
                     continue
                 
                 rank = self._ranks[nbr]
+                
+                # Calculate effective bond type for traversal ordering
+                effective_bondtype = bond.order
+                if bond.is_aromatic:
+                    effective_bondtype = max(effective_bondtype, 2)
+                
+                category = 1
                 if bond_idx in ring_bonds:
-                    rank += (_MAX_BONDTYPE - bond.order) * _MAX_NATOMS * _MAX_NATOMS
-                other_bonds.append((rank, nbr, bond_idx))
+                    category = 2
+                
+                bond_priority = -effective_bondtype if category != 1 else 0
+                
+                other_bonds.append(((category, bond_priority, rank), nbr, bond_idx))
             
-            other_bonds.sort(key=lambda x: (x[0], x[1]))
+            other_bonds.sort(key=lambda x: x[0])
             
             for bond_idx in ring_closure_bonds:
                 traversal_bonds.append(bond_idx)
@@ -216,19 +284,24 @@ class SmilesWriter:
             atom_traversal_order[atom_idx] = traversal_bonds
             
             # Calculate chirality inversion
+            # The chirality symbol (@/@@) in SMILES is relative to the order neighbors
+            # appear in the SMILES string. We compare the output traversal order to
+            # the original SMILES neighbor order (_smiles_neighbor_bonds), NOT the
+            # internal bond_indices order.
             if atom.chirality:
-                # Use SMILES-order bonds if available, otherwise fall back to bond_indices
-                original_bonds = (
-                    list(atom._smiles_neighbor_bonds) 
-                    if atom._smiles_neighbor_bonds is not None 
-                    else list(atom.bond_indices)
-                )
+                # Use _smiles_neighbor_bonds if available (the order from input SMILES),
+                # otherwise fall back to bond_indices
+                if atom._smiles_neighbor_bonds is not None:
+                    original_bonds = list(atom._smiles_neighbor_bonds)
+                else:
+                    original_bonds = list(atom.bond_indices)
+                    
                 is_first_in_output = (in_bond_idx is None)
                 was_first_in_input = atom._was_first_in_component
                 
                 h_position_changed = (
                     atom.explicit_hydrogens >= 1 and
-                    len(atom.bond_indices) == 3 and
+                    len(original_bonds) == 3 and
                     was_first_in_input and
                     not is_first_in_output
                 )
@@ -262,18 +335,22 @@ class SmilesWriter:
                 
                 if bond_idx in ring_digit_map:
                     digit = ring_digit_map[bond_idx]
-                    out.append(self._bond_to_smiles(bond, is_ring_closure=True))
+                    out.append(self._bond_to_smiles(bond, _is_ring_closure=True))
                     out.append(self._ring_number_to_smiles(digit))
                     digits_to_release.append(digit)
                     del ring_digit_map[bond_idx]
                 else:
-                    digit = available_digits.pop(0)
+                    if available_digits:
+                        digit = heapq.heappop(available_digits)
+                    else:
+                        digit = next_new_digit
+                        next_new_digit += 1
+                    
                     ring_digit_map[bond_idx] = digit
                     out.append(self._ring_number_to_smiles(digit))
             
             for digit in digits_to_release:
-                available_digits.append(digit)
-                available_digits.sort()
+                heapq.heappush(available_digits, digit)
             
             # Process children
             for i, (_, nbr, bond_idx) in enumerate(other_bonds):
@@ -359,10 +436,12 @@ class SmilesWriter:
                 parts.append(",".join(atom.atom_list))
             elif atom.is_wildcard:
                 parts.append("*")
-            elif atom.is_aromatic and atom.symbol[0].isupper():
+            elif atom.is_aromatic:
+                # Aromatic: output lowercase
                 parts.append(atom.symbol.lower())
             else:
-                parts.append(atom.symbol)
+                # Not aromatic: output capitalized (e.g., 'c' -> 'C')
+                parts.append(atom.symbol.capitalize())
             
             if chirality:
                 parts.append(chirality)
@@ -412,14 +491,18 @@ class SmilesWriter:
                 if atom.charge < -1:
                     parts.append(str(-atom.charge))
             
-            if atom.atom_class is not None:
+            if self._include_atom_class and atom.atom_class is not None:
                 parts.append(":")
                 parts.append(str(atom.atom_class))
             
-            parts.append("]")
+            parts.append("]") 
             return "".join(parts)
         else:
-            return atom.symbol.lower() if atom.is_aromatic else atom.symbol
+            # Non-bracket atom: output lowercase if aromatic, capitalized otherwise
+            if atom.is_aromatic:
+                return atom.symbol.lower()
+            else:
+                return atom.symbol.capitalize()
     
     def _needs_brackets(self, atom: Atom) -> bool:
         """Check if atom needs bracket notation.
@@ -479,7 +562,7 @@ class SmilesWriter:
         if atom.chirality:
             return True
         
-        if atom.atom_class is not None:
+        if self._include_atom_class and atom.atom_class is not None:
             return True
         
         # Aromatic nitrogen with explicit H needs brackets (e.g., pyrrole [nH])
@@ -517,7 +600,7 @@ class SmilesWriter:
         
         return False
     
-    def _bond_to_smiles(self, bond: Bond, is_ring_closure: bool = False) -> str:
+    def _bond_to_smiles(self, bond: Bond, _is_ring_closure: bool = False) -> str:
         """Convert bond to SMILES string.
         
         Single bonds between aromatic atoms that are not themselves aromatic
@@ -548,7 +631,9 @@ class SmilesWriter:
                 # Single bond between aromatics needs explicit '-'
                 return "-"
             
-            return bond.stereo or ""
+            if self._include_stereo:
+                return bond.stereo or ""
+            return ""
         
         if bond.order == 2:
             return "="
@@ -569,14 +654,231 @@ class SmilesWriter:
         if 10 <= n <= 99:
             return f"%{n}"
         return f"%({n})"
+    
+    def get_output_chirality(self) -> dict[int, str]:
+        """Compute output chirality for each chiral atom.
+        
+        This runs the SMILES generation algorithm to determine what chirality
+        symbol would be output for each chiral atom. This is useful for 
+        ensuring fragments preserve the correct stereochemistry.
+        
+        Returns:
+            Dict mapping atom index to output chirality symbol ('@' or '@@').
+        """
+        output_chirality: dict[int, str] = {}
+        
+        components = self._mol.connected_components()
+        for comp in components:
+            comp_set = set(comp)
+            inversion_map = self._compute_chirality_inversions(comp_set)
+            
+            for atom_idx in comp:
+                atom = self._mol.atoms[atom_idx]
+                if atom.chirality in ('@', '@@'):
+                    invert = inversion_map.get(atom_idx, False)
+                    if invert:
+                        output_chirality[atom_idx] = '@@' if atom.chirality == '@' else '@'
+                    else:
+                        output_chirality[atom_idx] = atom.chirality
+        
+        return output_chirality
+    
+    def _compute_chirality_inversions(self, comp_atoms: set[int]) -> dict[int, bool]:
+        """Compute which atoms need chirality inversion during output.
+        
+        This is extracted from _write_component to allow computing inversions
+        without generating the full SMILES string.
+        """
+        if not comp_atoms:
+            return {}
+        
+        # Find starting atom (lowest rank)
+        start = min(comp_atoms, key=lambda a: (self._ranks[a], a))
+        
+        # Find ring bonds
+        ring_bonds = self._find_ring_bonds(comp_atoms)
+        
+        # Phase 1: Find ring closures (same as _write_component)
+        WHITE, GREY, BLACK = 0, 1, 2
+        colors: dict[int, int] = {a: WHITE for a in comp_atoms}
+        atom_ring_closures: dict[int, list[int]] = {a: [] for a in comp_atoms}
+        
+        def dfs_find_cycles(atom_idx: int, in_bond_idx: int | None) -> None:
+            colors[atom_idx] = GREY
+            atom = self._mol.atoms[atom_idx]
+            
+            # Priority tuple: (category, -effective_bondtype, rank)
+            possibles: list[tuple[tuple[int, int, int], int, int]] = []
+            
+            for bond_idx in atom.bond_indices:
+                if bond_idx == in_bond_idx:
+                    continue
+                bond = self._mol.bonds[bond_idx]
+                nbr = bond.other_atom(atom_idx)
+                if nbr not in comp_atoms:
+                    continue
+                
+                rank = self._ranks[nbr]
+                effective_bondtype = bond.order
+                if bond.is_aromatic:
+                    effective_bondtype = max(effective_bondtype, 2)
+                
+                category = 1
+                if colors[nbr] == GREY:
+                    category = 0
+                elif bond_idx in ring_bonds:
+                    category = 2
+                
+                bond_priority = -effective_bondtype if category != 1 else 0
+                
+                possibles.append(((category, bond_priority, rank), nbr, bond_idx))
+            
+            possibles.sort(key=lambda x: x[0])
+            
+            for _, nbr, bond_idx in possibles:
+                if colors[nbr] == GREY:
+                    atom_ring_closures[atom_idx].append(bond_idx)
+                    atom_ring_closures[nbr].append(bond_idx)
+                elif colors[nbr] == WHITE:
+                    dfs_find_cycles(nbr, bond_idx)
+            
+            colors[atom_idx] = BLACK
+        
+        dfs_find_cycles(start, None)
+        
+        # Reset for phase 2
+        colors = {a: WHITE for a in comp_atoms}
+        chirality_inversion: dict[int, bool] = {}
+        ring_digit_map: dict[int, int] = {}
+        
+        def dfs_compute_inversions(atom_idx: int, in_bond_idx: int | None) -> None:
+            colors[atom_idx] = GREY
+            atom = self._mol.atoms[atom_idx]
+            
+            # Build traversal order (same logic as _write_component)
+            traversal_bonds: list[int] = []
+            # IMPORTANT: Include incoming bond first, just like _write_component does
+            if in_bond_idx is not None:
+                traversal_bonds.append(in_bond_idx)
+            
+            seen_from_here: set[int] = {atom_idx}
+            
+            ring_closure_bonds: list[int] = []
+            other_bonds: list[tuple[tuple[int, int, int], int, int]] = []
+            
+            for bond_idx in atom_ring_closures[atom_idx]:
+                bond = self._mol.bonds[bond_idx]
+                nbr = bond.other_atom(atom_idx)
+                ring_closure_bonds.append(bond_idx)
+                seen_from_here.add(nbr)
+            
+            def ring_closure_sort_key(bond_idx: int) -> int:
+                bond = self._mol.bonds[bond_idx]
+                nbr = bond.other_atom(atom_idx)
+                return self._ranks[nbr]
+            
+            ring_closure_bonds.sort(key=ring_closure_sort_key)
+            
+            for bond_idx in atom.bond_indices:
+                if bond_idx == in_bond_idx:
+                    continue
+                bond = self._mol.bonds[bond_idx]
+                nbr = bond.other_atom(atom_idx)
+                if nbr not in comp_atoms:
+                    continue
+                if colors[nbr] != WHITE or nbr in seen_from_here:
+                    continue
+                
+                rank = self._ranks[nbr]
+                effective_bondtype = bond.order
+                if bond.is_aromatic:
+                    effective_bondtype = max(effective_bondtype, 2)
+                
+                category = 1
+                if bond_idx in ring_bonds:
+                    category = 2
+                
+                bond_priority = -effective_bondtype if category != 1 else 0
+                
+                other_bonds.append(((category, bond_priority, rank), nbr, bond_idx))
+            
+            other_bonds.sort(key=lambda x: x[0])
+            
+            for bond_idx in ring_closure_bonds:
+                traversal_bonds.append(bond_idx)
+            for _, _, bond_idx in other_bonds:
+                traversal_bonds.append(bond_idx)
+            
+            # Calculate chirality inversion
+            # The chirality symbol (@/@@) in SMILES is relative to the order neighbors
+            # appear in the SMILES string. We compare the output traversal order to
+            # the original SMILES neighbor order (_smiles_neighbor_bonds), NOT the
+            # internal bond_indices order.
+            if atom.chirality:
+                # Use _smiles_neighbor_bonds if available (the order from input SMILES),
+                # otherwise fall back to bond_indices
+                if atom._smiles_neighbor_bonds is not None:
+                    original_bonds = list(atom._smiles_neighbor_bonds)
+                else:
+                    original_bonds = list(atom.bond_indices)
+                    
+                is_first_in_output = (in_bond_idx is None)
+                was_first_in_input = atom._was_first_in_component
+                
+                h_position_changed = (
+                    atom.explicit_hydrogens >= 1 and
+                    len(original_bonds) == 3 and
+                    was_first_in_input and
+                    not is_first_in_output
+                )
+                
+                n_swaps = 0
+                
+                if h_position_changed:
+                    original_with_h = [-1] + original_bonds
+                    traversal_with_h = [traversal_bonds[0], -1] + traversal_bonds[1:]
+                    try:
+                        n_swaps = count_swaps_to_interconvert(traversal_with_h, original_with_h)
+                    except ValueError:
+                        n_swaps = 0
+                else:
+                    if len(traversal_bonds) >= 3 and len(original_bonds) >= 3:
+                        try:
+                            n_swaps = count_swaps_to_interconvert(traversal_bonds, original_bonds)
+                        except ValueError:
+                            n_swaps = 0
+                
+                chirality_inversion[atom_idx] = (n_swaps % 2 == 1)
+            
+            # Track ring digits
+            for bond_idx in ring_closure_bonds:
+                if bond_idx not in ring_digit_map:
+                    ring_digit_map[bond_idx] = len(ring_digit_map) + 1
+            
+            # Recurse
+            for _, nbr, bond_idx in other_bonds:
+                if colors[nbr] == WHITE:
+                    dfs_compute_inversions(nbr, bond_idx)
+            
+            colors[atom_idx] = BLACK
+        
+        dfs_compute_inversions(start, None)
+        return chirality_inversion
 
 
-def to_smiles(mol: Molecule, ranks: list[int] | None = None) -> str:
+def to_smiles(
+    mol: Molecule,
+    ranks: list[int] | None = None,
+    include_atom_class: bool = True,
+    include_stereo: bool = True,
+) -> str:
     """Convert a Molecule to a SMILES string.
     
     Args:
         mol: Molecule to convert.
         ranks: Pre-computed canonical ranks (computed if None).
+        include_atom_class: If True (default), include atom class annotations (:N).
+        include_stereo: If True (default), include bond stereochemistry (/, \\).
     
     Returns:
         SMILES string.
@@ -586,7 +888,27 @@ def to_smiles(mol: Molecule, ranks: list[int] | None = None) -> str:
         >>> to_smiles(mol)
         'CCCC'
     """
-    return SmilesWriter(mol, ranks).to_smiles()
+    return SmilesWriter(
+        mol, ranks,
+        include_atom_class=include_atom_class,
+        include_stereo=include_stereo,
+    ).to_smiles()
+
+
+def get_output_chirality(mol: Molecule, ranks: list[int] | None = None) -> dict[int, str]:
+    """Get the output chirality for each chiral atom in a molecule.
+    
+    This computes what chirality symbol would be written to SMILES for each
+    chiral atom, accounting for traversal order and inversion rules.
+    
+    Args:
+        mol: Molecule to analyze.
+        ranks: Pre-computed canonical ranks (computed if None).
+    
+    Returns:
+        Dict mapping atom index to output chirality symbol ('@' or '@@').
+    """
+    return SmilesWriter(mol, ranks).get_output_chirality()
 
 
 def canonical_smiles(smiles_or_mol: str | "Molecule") -> str:

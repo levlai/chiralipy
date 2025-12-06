@@ -291,7 +291,8 @@ class TestCombinedQueries:
     
     def test_aromatic_nitrogen_in_ring(self) -> None:
         """Test [nR] - aromatic nitrogen in ring."""
-        mol = parse("[nR]")
+        # Use perceive_aromaticity=False for SMARTS patterns
+        mol = parse("[nR]", perceive_aromaticity=False)
         assert mol.atoms[0].symbol == "n"
         assert mol.atoms[0].is_aromatic is True
         assert mol.atoms[0].ring_count == -1
@@ -550,3 +551,106 @@ class TestComplexRecursiveSmarts:
         mol = parse("[N;$(N(@C(=O))@[C,N,O,S])]")
         assert len(mol.atoms) == 1
         assert mol.atoms[0].is_recursive is True
+
+
+class TestDegreeQueryList:
+    """Tests for OR'd degree query parsing [D2,D3].
+    
+    This tests the fix for BRICS L7a/L7b pattern [C;D2,D3]-[#6]
+    where the comma-separated degrees should be parsed as OR'd constraints.
+    """
+    
+    def test_degree_query_list(self) -> None:
+        """Test [C;D2,D3] parses with degree_query_list."""
+        mol = parse("[C;D2,D3]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].degree_query_list == [2, 3]
+    
+    def test_degree_query_list_in_brics_l7a(self) -> None:
+        """Test full L7a pattern [C;D2,D3]-[#6] parses correctly."""
+        mol = parse("[C;D2,D3]-[#6]")
+        assert len(mol.atoms) == 2
+        assert mol.atoms[0].degree_query_list == [2, 3]
+        assert mol.atoms[1].atomic_number_list == [6]
+    
+    def test_single_degree_not_in_list(self) -> None:
+        """Test single [D2] uses degree_query, not degree_query_list."""
+        mol = parse("[D2]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].degree_query == 2
+        assert mol.atoms[0].degree_query_list is None or mol.atoms[0].degree_query_list == []
+
+
+class TestNegatedBondParsing:
+    """Tests for negated bond parsing (!-).
+    
+    This tests the fix for BRICS L8 pattern [C;!R;!D1;!$(C!-*)]
+    where !- means "negated single bond" (must not have any single bonds).
+    """
+    
+    def test_negated_single_bond(self) -> None:
+        """Test C!-C parses with negated bond."""
+        mol = parse("C!-C")
+        assert len(mol.atoms) == 2
+        assert len(mol.bonds) == 1
+        assert mol.bonds[0].is_negated is True
+        assert mol.bonds[0].order == 1
+    
+    def test_negated_double_bond(self) -> None:
+        """Test C!=C parses with negated double bond."""
+        mol = parse("C!=C")
+        assert len(mol.atoms) == 2
+        assert len(mol.bonds) == 1
+        assert mol.bonds[0].is_negated is True
+        assert mol.bonds[0].order == 2
+    
+    def test_negated_bond_in_recursive_smarts(self) -> None:
+        """Test !-* inside recursive SMARTS."""
+        mol = parse("[C;!$(C!-*)]")
+        assert len(mol.atoms) == 1
+        # The negated recursive SMARTS should parse without error
+        assert mol.atoms[0].negated_recursive_smarts is not None
+    
+    def test_brics_l8_pattern(self) -> None:
+        """Test full L8 pattern parses correctly."""
+        mol = parse("[C;!R;!D1;!$(C!-*)]")
+        assert len(mol.atoms) == 1
+        # Atom should have the negated recursive SMARTS for the !-* part
+        assert mol.atoms[0].negated_recursive_smarts is not None
+
+
+class TestNegatedAtomicNumberList:
+    """Tests for negated atomic number list parsing [!#6;!#16;!#0;!#1].
+    
+    This tests the fix for BRICS L5 pattern 
+    [N;!D1;!$(N=*);!$(N-[!#6;!#16;!#0;!#1]);!$([N;R]@[C;R]=O)]
+    where [!#6;!#16;!#0;!#1] means "not carbon, not sulfur, not dummy, not hydrogen".
+    """
+    
+    def test_single_negated_atomic_number(self) -> None:
+        """Test [!#6] - not carbon."""
+        mol = parse("[!#6]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].negated_atomic_number_list == [6]
+        assert mol.atoms[0].symbol == "*"  # Wildcard since it's "not carbon"
+    
+    def test_multiple_negated_atomic_numbers(self) -> None:
+        """Test [!#6;!#16;!#0;!#1] - not C, S, *, H."""
+        mol = parse("[!#6;!#16;!#0;!#1]")
+        assert len(mol.atoms) == 1
+        # All negated atomic numbers should be in the list
+        assert set(mol.atoms[0].negated_atomic_number_list) == {6, 16, 0, 1}
+    
+    def test_negated_atomic_number_in_recursive(self) -> None:
+        """Test negated atomic numbers inside recursive SMARTS."""
+        mol = parse("[N;$(N-[!#6;!#1])]")
+        assert len(mol.atoms) == 1
+        assert mol.atoms[0].is_recursive is True
+    
+    def test_brics_l5_pattern(self) -> None:
+        """Test full L5 pattern parses correctly."""
+        mol = parse("[N;!D1;!$(N=*);!$(N-[!#6;!#16;!#0;!#1]);!$([N;R]@[C;R]=O)]")
+        assert len(mol.atoms) == 1
+        # Should have multiple negated recursive SMARTS
+        assert mol.atoms[0].negated_recursive_smarts is not None
+        assert len(mol.atoms[0].negated_recursive_smarts) >= 3
